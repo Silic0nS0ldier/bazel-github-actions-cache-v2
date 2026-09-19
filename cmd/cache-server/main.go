@@ -43,7 +43,7 @@ func run() error {
 		storageMode      = flag.String("storage-mode", "objects", "storage mode: objects or packs")
 		packSize         = flag.Int64("pack-size", 8*1024*1024, "target CARv2 pack size in bytes")
 		packFlush        = flag.Duration("pack-flush-interval", 30*time.Second, "maximum delay before flushing pending CARv2 data")
-		maxManifests     = flag.Int("max-manifests", 2048, "maximum manifest cache entries to discover")
+		maxManifests     = flag.Int("max-manifests", 2048, "maximum manifests to read during discovery; any beyond this are ignored")
 		writeEnabled     = flag.Bool("write-enabled", false, "publish validated uploads")
 		failOpen         = flag.Bool("fail-open", true, "degrade backend errors to misses/success")
 		maxBlobSize      = flag.Int64("max-blob-size", 512*1024*1024, "maximum object size in bytes")
@@ -91,7 +91,7 @@ func run() error {
 	logger := log.New(os.Stderr, "bazel-gha-cache: ", log.LstdFlags|log.LUTC)
 	var catalog cache.Catalog
 	if *storageMode == "packs" {
-		catalog, err = cache.NewActionsCatalog(*backendTimeout)
+		catalog, err = cache.NewActionsCatalog(*backendTimeout, logger)
 		if err != nil {
 			return err
 		}

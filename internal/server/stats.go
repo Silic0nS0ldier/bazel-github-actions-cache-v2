@@ -28,7 +28,10 @@ type Stats struct {
 	PackUploads                uint64 `json:"pack_uploads"`
 	ManifestUploads            uint64 `json:"manifest_uploads"`
 	PackDownloads              uint64 `json:"pack_downloads"`
+	PackLoadsSkipped           uint64 `json:"pack_loads_skipped"`
+	PacksDiscovered            uint64 `json:"packs_discovered"`
 	ManifestsDiscovered        uint64 `json:"manifests_discovered"`
+	ManifestDiscoveryTruncated bool   `json:"manifest_discovery_truncated"`
 	ManifestDiscoveryErrors    uint64 `json:"manifest_discovery_errors"`
 	ManifestLoadErrors         uint64 `json:"manifest_load_errors"`
 	ActionDigestConflicts      uint64 `json:"action_digest_conflicts"`
@@ -56,7 +59,10 @@ type counters struct {
 	packUploads                atomic.Uint64
 	manifestUploads            atomic.Uint64
 	packDownloads              atomic.Uint64
+	packLoadsSkipped           atomic.Uint64
+	packsDiscovered            atomic.Uint64
 	manifestsDiscovered        atomic.Uint64
+	manifestDiscoveryTruncated atomic.Bool
 	manifestDiscoveryErrors    atomic.Uint64
 	manifestLoadErrors         atomic.Uint64
 	actionDigestConflicts      atomic.Uint64
@@ -85,7 +91,10 @@ func (c *counters) snapshot() Stats {
 		PackUploads:                c.packUploads.Load(),
 		ManifestUploads:            c.manifestUploads.Load(),
 		PackDownloads:              c.packDownloads.Load(),
+		PackLoadsSkipped:           c.packLoadsSkipped.Load(),
+		PacksDiscovered:            c.packsDiscovered.Load(),
 		ManifestsDiscovered:        c.manifestsDiscovered.Load(),
+		ManifestDiscoveryTruncated: c.manifestDiscoveryTruncated.Load(),
 		ManifestDiscoveryErrors:    c.manifestDiscoveryErrors.Load(),
 		ManifestLoadErrors:         c.manifestLoadErrors.Load(),
 		ActionDigestConflicts:      c.actionDigestConflicts.Load(),

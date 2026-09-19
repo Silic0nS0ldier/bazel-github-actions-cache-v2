@@ -16,7 +16,7 @@ type memoryCatalog struct {
 	backend *memoryBackend
 }
 
-func (c memoryCatalog) List(_ context.Context, prefix string, limit int) ([]string, error) {
+func (c memoryCatalog) List(_ context.Context, prefix string, limit int) ([]string, bool, error) {
 	c.backend.mu.Lock()
 	defer c.backend.mu.Unlock()
 	keys := make([]string, 0)
@@ -26,10 +26,10 @@ func (c memoryCatalog) List(_ context.Context, prefix string, limit int) ([]stri
 		}
 	}
 	sort.Strings(keys)
-	if len(keys) > limit {
-		return nil, context.DeadlineExceeded
+	if limit > cache.UnboundedListing && len(keys) > limit {
+		return keys[:limit], true, nil
 	}
-	return keys, nil
+	return keys, false, nil
 }
 
 var _ cache.Catalog = memoryCatalog{}
@@ -166,8 +166,68 @@ func TestPackedStoreTreatsMissingPackAsActionCacheMiss(t *testing.T) {
 	backend.mu.Unlock()
 	restore := testPackedServer(t, backend)
 	defer closePackedServer(t, restore)
+	loadsAfterDiscovery := backend.loadCount()
 	if response := readCacheObject(restore, "/ac/"+actionDigest); response.Code != http.StatusNotFound {
 		t.Fatalf("missing pack action result = %d", response.Code)
+	}
+	if backend.loadCount() != loadsAfterDiscovery {
+		t.Fatal("an evicted pack was downloaded even though the catalog listing omits it")
+	}
+	stats := restore.Snapshot()
+	if stats.PackLoadsSkipped != 1 || stats.BackendLoadErrors != 0 {
+		t.Fatalf("unexpected unavailable-pack stats: %+v", stats)
+	}
+}
+
+func TestPackedStoreDiscoversPacksAndManifestsInOneListing(t *testing.T) {
+	backend := newMemoryBackend()
+	seed := testPackedServer(t, backend)
+	body := []byte("listed payload")
+	if response := putCacheObject(seed, "/cas/"+digest(body), body); response.Code != http.StatusNoContent {
+		t.Fatalf("CAS PUT = %d", response.Code)
+	}
+	closePackedServer(t, seed)
+
+	restore := testPackedServer(t, backend)
+	defer closePackedServer(t, restore)
+	stats := restore.Snapshot()
+	if stats.PacksDiscovered != 1 || stats.ManifestsDiscovered != 1 {
+		t.Fatalf("unexpected discovery stats: %+v", stats)
+	}
+	if response := readCacheObject(restore, "/cas/"+digest(body)); response.Code != http.StatusOK {
+		t.Fatalf("CAS GET = %d", response.Code)
+	}
+}
+
+func TestPackedStoreLimitsDownloadedManifestsWithoutCountingPacks(t *testing.T) {
+	backend := newMemoryBackend()
+	payloads := [][]byte{[]byte("one"), []byte("two"), []byte("three")}
+	for _, body := range payloads {
+		writer := testPackedServer(t, backend)
+		if response := putCacheObject(writer, "/cas/"+digest(body), body); response.Code != http.StatusNoContent {
+			t.Fatalf("CAS PUT = %d", response.Code)
+		}
+		closePackedServer(t, writer)
+	}
+
+	restore := testServer(t, backend, func(cfg *Config) {
+		cfg.StorageMode = "packs"
+		cfg.Catalog = memoryCatalog{backend: backend}
+		cfg.PackSize = 1024
+		cfg.PackFlushInterval = time.Hour
+		cfg.MaxManifests = 2
+	})
+	defer closePackedServer(t, restore)
+	stats := restore.Snapshot()
+	if stats.PacksDiscovered != 3 || stats.ManifestsDiscovered != 2 || !stats.ManifestDiscoveryTruncated {
+		t.Fatalf("unexpected bounded-discovery stats: %+v", stats)
+	}
+	for _, body := range payloads {
+		readCacheObject(restore, "/cas/"+digest(body))
+	}
+	stats = restore.Snapshot()
+	if stats.Hits != 2 || stats.Misses != 1 {
+		t.Fatalf("max-manifests should bound manifest reads, not the pack listing: %+v", stats)
 	}
 }
 
