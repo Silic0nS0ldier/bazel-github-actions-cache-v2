@@ -30,6 +30,8 @@ type Stats struct {
 	PackDownloads              uint64 `json:"pack_downloads"`
 	PackLoadsSkipped           uint64 `json:"pack_loads_skipped"`
 	PackRenewals               uint64 `json:"pack_renewals"`
+	CompressedBlocks           uint64 `json:"compressed_blocks"`
+	CompressionSavedBytes      uint64 `json:"compression_saved_bytes"`
 	PacksDiscovered            uint64 `json:"packs_discovered"`
 	ManifestsDiscovered        uint64 `json:"manifests_discovered"`
 	ManifestsSkipped           uint64 `json:"manifests_skipped"`
@@ -63,6 +65,8 @@ type counters struct {
 	packDownloads              atomic.Uint64
 	packLoadsSkipped           atomic.Uint64
 	packRenewals               atomic.Uint64
+	compressedBlocks           atomic.Uint64
+	compressionSavedBytes      atomic.Uint64
 	packsDiscovered            atomic.Uint64
 	manifestsDiscovered        atomic.Uint64
 	manifestsSkipped           atomic.Uint64
@@ -97,6 +101,8 @@ func (c *counters) snapshot() Stats {
 		PackDownloads:              c.packDownloads.Load(),
 		PackLoadsSkipped:           c.packLoadsSkipped.Load(),
 		PackRenewals:               c.packRenewals.Load(),
+		CompressedBlocks:           c.compressedBlocks.Load(),
+		CompressionSavedBytes:      c.compressionSavedBytes.Load(),
 		PacksDiscovered:            c.packsDiscovered.Load(),
 		ManifestsDiscovered:        c.manifestsDiscovered.Load(),
 		ManifestsSkipped:           c.manifestsSkipped.Load(),

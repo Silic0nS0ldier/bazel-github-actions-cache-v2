@@ -16,12 +16,30 @@ func TestManifestDAGCBORRoundTripIsDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	packID := digest([]byte("pack"))
+	compressedCID, err := rawCIDForData([]byte("compressed action bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	value := manifest{
 		Version: manifestFormatVersion,
 		Parents: []string{},
 		Packs:   []packDescriptor{{ID: packID, Key: packKeyFor("test", packID), Size: 123}},
-		CAS:     []manifestObject{{Digest: casDigest, CID: casCID.String(), PackID: packID, Size: 3}},
-		Actions: []manifestAction{{Digest: digest([]byte("action")), CID: actionCID.String(), PackID: packID, Size: 2, ClosurePacks: []string{packID}}},
+		CAS: []manifestObject{{
+			Digest: casDigest,
+			CID:    casCID.String(),
+			Block:  casCID.String(),
+			PackID: packID,
+			Size:   3,
+		}},
+		Actions: []manifestAction{{
+			Digest:       digest([]byte("action")),
+			CID:          actionCID.String(),
+			Block:        compressedCID.String(),
+			Encoding:     blockEncodingZstd,
+			PackID:       packID,
+			Size:         2,
+			ClosurePacks: []string{packID},
+		}},
 	}
 	encoded, manifestCID, err := encodeManifest(value)
 	if err != nil {

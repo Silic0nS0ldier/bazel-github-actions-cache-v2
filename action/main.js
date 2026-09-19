@@ -68,6 +68,8 @@ async function main() {
   const packSizeMB = positiveInteger("pack-size-mb", 8, 32);
   const packFlushSeconds = positiveInteger("pack-flush-seconds", 30, 3600);
   const packRenewSeconds = positiveInteger("pack-renew-seconds", 15, 3600);
+  const packCompression = parseBoolean(input("pack-compression", "true"), "pack-compression");
+  const packCompressionLevel = positiveInteger("pack-compression-level", 3, 19);
   const maxManifests = positiveInteger("max-manifests", 2048, 10_000);
   const githubToken = input("github-token", "");
   if (storageMode === "packs" && !githubToken) {
@@ -105,6 +107,9 @@ async function main() {
     `${packFlushSeconds}s`,
     "--pack-renew-interval",
     `${packRenewSeconds}s`,
+    booleanFlag("pack-compression", packCompression),
+    "--pack-compression-level",
+    String(packCompressionLevel),
     "--max-manifests",
     String(maxManifests),
     booleanFlag("write-enabled", writeEnabled),

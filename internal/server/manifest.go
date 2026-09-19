@@ -16,7 +16,12 @@ import (
 	"github.com/multiformats/go-multihash"
 )
 
-const manifestFormatVersion = 1
+// Format 2 adds per-block encoding. Readers still accept format 1, where every
+// block is stored verbatim.
+const (
+	manifestFormatVersion    = 2
+	minManifestFormatVersion = 1
+)
 
 type manifest struct {
 	Version int64
@@ -32,16 +37,22 @@ type packDescriptor struct {
 	Size int64
 }
 
+// Block names the stored bytes, which differ from CID when Encoding is set.
+// CID always addresses the object itself, so it stays the logical identity.
 type manifestObject struct {
-	Digest string
-	CID    string
-	PackID string
-	Size   int64
+	Digest   string
+	CID      string
+	Block    string
+	Encoding string
+	PackID   string
+	Size     int64
 }
 
 type manifestAction struct {
 	Digest       string
 	CID          string
+	Block        string
+	Encoding     string
 	PackID       string
 	Size         int64
 	ClosurePacks []string
@@ -82,7 +93,7 @@ func decodeManifest(data []byte, expectedCID string) (manifest, error) {
 }
 
 func manifestToNode(value manifest) (datamodel.Node, error) {
-	if value.Version != manifestFormatVersion {
+	if value.Version < minManifestFormatVersion || value.Version > manifestFormatVersion {
 		return nil, fmt.Errorf("unsupported manifest version %d", value.Version)
 	}
 	parents := append([]string(nil), value.Parents...)
@@ -99,10 +110,10 @@ func manifestToNode(value manifest) (datamodel.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := assembleManifestActions(assembler, actions); err != nil {
+	if err := assembleManifestActions(assembler, actions, value.Version); err != nil {
 		return nil, err
 	}
-	if err := assembleManifestCAS(assembler, cas); err != nil {
+	if err := assembleManifestCAS(assembler, cas, value.Version); err != nil {
 		return nil, err
 	}
 	if err := assembleManifestPacks(assembler, packs); err != nil {
@@ -120,7 +131,7 @@ func manifestToNode(value manifest) (datamodel.Node, error) {
 	return builder.Build(), nil
 }
 
-func assembleManifestActions(assembler datamodel.MapAssembler, actions []manifestAction) error {
+func assembleManifestActions(assembler datamodel.MapAssembler, actions []manifestAction, version int64) error {
 	if err := assembler.AssembleKey().AssignString("actions"); err != nil {
 		return err
 	}
@@ -128,18 +139,27 @@ func assembleManifestActions(assembler datamodel.MapAssembler, actions []manifes
 	if err != nil {
 		return err
 	}
+	encoded := version >= manifestFormatVersion
 	for _, action := range actions {
 		closure := append([]string(nil), action.ClosurePacks...)
 		sort.Strings(closure)
-		mapAssembler, err := list.AssembleValue().BeginMap(5)
-		if err != nil {
-			return err
-		}
-		for _, field := range []struct{ key, value string }{
+		fields := []struct{ key, value string }{
 			{"cid", action.CID},
 			{"digest", action.Digest},
 			{"pack", action.PackID},
-		} {
+		}
+		if encoded {
+			fields = append(fields,
+				struct{ key, value string }{"block", action.Block},
+				struct{ key, value string }{"encoding", action.Encoding},
+			)
+		}
+		mapAssembler, err := list.AssembleValue().BeginMap(int64(len(fields)) + 2)
+		if err != nil {
+			return err
+		}
+		sort.Slice(fields, func(i, j int) bool { return fields[i].key < fields[j].key })
+		for _, field := range fields {
 			if err := assembleString(mapAssembler, field.key, field.value); err != nil {
 				return err
 			}
@@ -157,7 +177,7 @@ func assembleManifestActions(assembler datamodel.MapAssembler, actions []manifes
 	return list.Finish()
 }
 
-func assembleManifestCAS(assembler datamodel.MapAssembler, objects []manifestObject) error {
+func assembleManifestCAS(assembler datamodel.MapAssembler, objects []manifestObject, version int64) error {
 	if err := assembler.AssembleKey().AssignString("cas"); err != nil {
 		return err
 	}
@@ -165,16 +185,25 @@ func assembleManifestCAS(assembler datamodel.MapAssembler, objects []manifestObj
 	if err != nil {
 		return err
 	}
+	encoded := version >= manifestFormatVersion
 	for _, object := range objects {
-		mapAssembler, err := list.AssembleValue().BeginMap(4)
-		if err != nil {
-			return err
-		}
-		for _, field := range []struct{ key, value string }{
+		fields := []struct{ key, value string }{
 			{"cid", object.CID},
 			{"digest", object.Digest},
 			{"pack", object.PackID},
-		} {
+		}
+		if encoded {
+			fields = append(fields,
+				struct{ key, value string }{"block", object.Block},
+				struct{ key, value string }{"encoding", object.Encoding},
+			)
+		}
+		mapAssembler, err := list.AssembleValue().BeginMap(int64(len(fields)) + 1)
+		if err != nil {
+			return err
+		}
+		sort.Slice(fields, func(i, j int) bool { return fields[i].key < fields[j].key })
+		for _, field := range fields {
 			if err := assembleString(mapAssembler, field.key, field.value); err != nil {
 				return err
 			}
@@ -256,7 +285,7 @@ func nodeToManifest(node datamodel.Node) (manifest, error) {
 	if err != nil {
 		return manifest{}, err
 	}
-	if version != manifestFormatVersion {
+	if version < minManifestFormatVersion || version > manifestFormatVersion {
 		return manifest{}, fmt.Errorf("unsupported manifest version %d", version)
 	}
 	parents, err := nodeStringList(node, "parents")
@@ -301,6 +330,9 @@ func (value manifest) validate() error {
 		if !digestPattern.MatchString(object.Digest) || object.Size < 0 || !validRawCID(object.CID, object.Digest) {
 			return errors.New("manifest has invalid CAS entry")
 		}
+		if err := validateStoredBlock(object.CID, object.Block, object.Encoding); err != nil {
+			return err
+		}
 		if _, ok := packIDs[object.PackID]; !ok {
 			return errors.New("CAS entry references an undeclared pack")
 		}
@@ -313,6 +345,9 @@ func (value manifest) validate() error {
 	for _, action := range value.Actions {
 		if !digestPattern.MatchString(action.Digest) || action.Size < 0 || !validCID(action.CID) {
 			return errors.New("manifest has invalid action entry")
+		}
+		if err := validateStoredBlock(action.CID, action.Block, action.Encoding); err != nil {
+			return err
 		}
 		if _, ok := packIDs[action.PackID]; !ok {
 			return errors.New("action entry references an undeclared pack")
@@ -417,9 +452,42 @@ func nodeActions(node datamodel.Node) ([]manifestAction, error) {
 		if err != nil {
 			return nil, err
 		}
-		values = append(values, manifestAction{Digest: digest, CID: contentCID, PackID: packID, Size: size, ClosurePacks: closure})
+		block, encoding, err := nodeBlockEncoding(item, contentCID)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, manifestAction{
+			Digest:       digest,
+			CID:          contentCID,
+			Block:        block,
+			Encoding:     encoding,
+			PackID:       packID,
+			Size:         size,
+			ClosurePacks: closure,
+		})
 	}
 	return values, nil
+}
+
+// nodeBlockEncoding reads the format 2 fields, defaulting to a verbatim block
+// so a format 1 manifest keeps working.
+func nodeBlockEncoding(node datamodel.Node, contentCID string) (string, string, error) {
+	encodingNode, err := node.LookupByString("encoding")
+	if err != nil {
+		return contentCID, blockEncodingRaw, nil
+	}
+	if encodingNode.Kind() != datamodel.Kind_String {
+		return "", "", errors.New("manifest encoding must be a string")
+	}
+	encoding, err := encodingNode.AsString()
+	if err != nil {
+		return "", "", err
+	}
+	block, err := nodeString(node, "block")
+	if err != nil {
+		return "", "", err
+	}
+	return block, encoding, nil
 }
 
 func nodeObject(node datamodel.Node) (manifestObject, error) {
@@ -439,7 +507,18 @@ func nodeObject(node datamodel.Node) (manifestObject, error) {
 	if err != nil {
 		return manifestObject{}, err
 	}
-	return manifestObject{Digest: digest, CID: contentCID, PackID: packID, Size: size}, nil
+	block, encoding, err := nodeBlockEncoding(node, contentCID)
+	if err != nil {
+		return manifestObject{}, err
+	}
+	return manifestObject{
+		Digest:   digest,
+		CID:      contentCID,
+		Block:    block,
+		Encoding: encoding,
+		PackID:   packID,
+		Size:     size,
+	}, nil
 }
 
 func nodeString(node datamodel.Node, key string) (string, error) {
@@ -507,6 +586,25 @@ func rawCIDForData(data []byte) (cid.Cid, error) {
 func validRawCID(value, digest string) bool {
 	expected, err := rawCIDForDigest(digest)
 	return err == nil && value == expected.String()
+}
+
+// validateStoredBlock keeps the stored block and its encoding consistent: a
+// verbatim block is addressed by the object's own CID, and an encoded one must
+// name a different block.
+func validateStoredBlock(contentCID, block, encoding string) error {
+	if !validBlockEncoding(encoding) {
+		return errors.New("manifest has unsupported block encoding")
+	}
+	if !validCID(block) {
+		return errors.New("manifest has invalid stored block CID")
+	}
+	if encoding == blockEncodingRaw && block != contentCID {
+		return errors.New("verbatim block must be addressed by the object CID")
+	}
+	if encoding != blockEncodingRaw && block == contentCID {
+		return errors.New("encoded block must not be addressed by the object CID")
+	}
+	return nil
 }
 
 func validCID(value string) bool {

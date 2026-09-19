@@ -64,6 +64,7 @@ func testPackedServerWithMaxBlob(t *testing.T, backend *memoryBackend, maxBlobSi
 		cfg.MaxBlobSize = maxBlobSize
 		cfg.PackSize = 1024
 		cfg.PackFlushInterval = time.Hour
+		cfg.PackCompression = true
 		cfg.MaxManifests = 100
 	})
 }

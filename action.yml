@@ -33,6 +33,14 @@ inputs:
     description: "Seconds that pack retention renewals are batched before being sent; renewals also flush at shutdown"
     required: false
     default: "15"
+  pack-compression:
+    description: "Compress individual pack blocks with zstd when they shrink meaningfully"
+    required: false
+    default: "true"
+  pack-compression-level:
+    description: "zstd level used for pack blocks (1-19); higher trades flush time for size"
+    required: false
+    default: "3"
   max-manifests:
     description: "Maximum manifests to download during discovery; any beyond this are ignored and become cache misses"
     required: false

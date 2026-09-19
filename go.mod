@@ -11,7 +11,10 @@ require (
 	github.com/tonistiigi/go-actions-cache v0.0.0-20260120203934-54bc28c26fd2
 )
 
-require google.golang.org/protobuf v1.36.11
+require (
+	github.com/klauspost/compress v1.20.0
+	google.golang.org/protobuf v1.36.11
+)
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.16.0 // indirect
