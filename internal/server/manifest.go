@@ -524,8 +524,15 @@ func packKeyFor(prefix, id string) string {
 	return carKeyPrefix(prefix) + "pack-v1-" + id
 }
 
-func manifestKeyFor(prefix, id string) string {
-	return carKeyPrefix(prefix) + "manifest-v1-" + id
+func manifestKeyPrefix(prefix string) string {
+	return carKeyPrefix(prefix) + "manifest-v2-"
+}
+
+// manifestKeyFor names a manifest after the pack it commits, so a reader can
+// tell from a listing alone that a manifest has outlived its pack and is not
+// worth downloading.
+func manifestKeyFor(prefix, packID, manifestID string) string {
+	return manifestKeyPrefix(prefix) + packID + "-" + manifestID
 }
 
 func stringsHasSuffix(value, suffix string) bool {

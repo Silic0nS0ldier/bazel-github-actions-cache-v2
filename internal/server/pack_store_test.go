@@ -16,7 +16,7 @@ type memoryCatalog struct {
 	backend *memoryBackend
 }
 
-func (c memoryCatalog) List(_ context.Context, prefix string, limit int) ([]string, int, error) {
+func (c memoryCatalog) List(_ context.Context, prefix string) ([]string, error) {
 	c.backend.mu.Lock()
 	defer c.backend.mu.Unlock()
 	keys := make([]string, 0)
@@ -26,13 +26,30 @@ func (c memoryCatalog) List(_ context.Context, prefix string, limit int) ([]stri
 		}
 	}
 	sort.Strings(keys)
-	if limit > cache.UnboundedListing && len(keys) > limit {
-		return keys[:limit], len(keys) - limit, nil
-	}
-	return keys, 0, nil
+	return keys, nil
 }
 
 var _ cache.Catalog = memoryCatalog{}
+
+// phantomCatalog reports keys the backend cannot serve, as GitHub's REST
+// listing does for packs outside the running job's cache scope.
+type phantomCatalog struct {
+	memoryCatalog
+	phantom []string
+}
+
+func (c phantomCatalog) List(ctx context.Context, prefix string) ([]string, error) {
+	keys, err := c.memoryCatalog.List(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range c.phantom {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	return keys, nil
+}
 
 func testPackedServer(t *testing.T, backend *memoryBackend) *Server {
 	return testPackedServerWithMaxBlob(t, backend, 1024)
@@ -148,7 +165,7 @@ func TestPackedStoreMergesConcurrentManifestHeads(t *testing.T) {
 	}
 }
 
-func TestPackedStoreTreatsMissingPackAsActionCacheMiss(t *testing.T) {
+func TestPackedStoreLeavesOrphanedManifestsUnread(t *testing.T) {
 	backend := newMemoryBackend()
 	seed := testPackedServer(t, backend)
 	actionDigest := digest([]byte("action"))
@@ -157,6 +174,7 @@ func TestPackedStoreTreatsMissingPackAsActionCacheMiss(t *testing.T) {
 	}
 	closePackedServer(t, seed)
 
+	// Emulate GitHub evicting the large pack while its small manifest survives.
 	backend.mu.Lock()
 	for key := range backend.objects {
 		if strings.Contains(key, "-car-pack-v1-") {
@@ -164,22 +182,66 @@ func TestPackedStoreTreatsMissingPackAsActionCacheMiss(t *testing.T) {
 		}
 	}
 	backend.mu.Unlock()
+
+	loadsBeforeDiscovery := backend.loadCount()
 	restore := testPackedServer(t, backend)
 	defer closePackedServer(t, restore)
-	loadsAfterDiscovery := backend.loadCount()
-	if response := readCacheObject(restore, "/ac/"+actionDigest); response.Code != http.StatusNotFound {
-		t.Fatalf("missing pack action result = %d", response.Code)
+	if backend.loadCount() != loadsBeforeDiscovery {
+		t.Fatal("an orphaned manifest was downloaded, which would renew its lifetime")
 	}
-	if backend.loadCount() != loadsAfterDiscovery {
-		t.Fatal("an evicted pack was downloaded even though the catalog listing omits it")
+	if response := readCacheObject(restore, "/ac/"+actionDigest); response.Code != http.StatusNotFound {
+		t.Fatalf("orphaned action result = %d", response.Code)
 	}
 	stats := restore.Snapshot()
-	if stats.PackLoadsSkipped != 1 || stats.BackendLoadErrors != 0 {
-		t.Fatalf("unexpected unavailable-pack stats: %+v", stats)
+	if stats.ManifestsDiscovered != 1 || stats.ManifestsOrphaned != 1 || stats.BackendLoadErrors != 0 {
+		t.Fatalf("unexpected orphaned-manifest stats: %+v", stats)
 	}
 }
 
-func TestPackedStoreDiscoversPacksAndManifestsInOneListing(t *testing.T) {
+func TestPackedStoreRetriesAnUnrestorablePackOnlyOnce(t *testing.T) {
+	backend := newMemoryBackend()
+	seed := testPackedServer(t, backend)
+	body := []byte("out of scope payload")
+	if response := putCacheObject(seed, "/cas/"+digest(body), body); response.Code != http.StatusNoContent {
+		t.Fatalf("CAS PUT = %d", response.Code)
+	}
+	closePackedServer(t, seed)
+
+	// A pack listed for the repository can still be outside this job's cache
+	// scope, which only a failed download reveals.
+	var packKey string
+	backend.mu.Lock()
+	for key := range backend.objects {
+		if strings.Contains(key, "-car-pack-v1-") {
+			packKey = key
+		}
+	}
+	delete(backend.objects, packKey)
+	backend.mu.Unlock()
+	if packKey == "" {
+		t.Fatal("no pack was published")
+	}
+
+	restore := testServer(t, backend, func(cfg *Config) {
+		cfg.StorageMode = "packs"
+		cfg.Catalog = phantomCatalog{memoryCatalog{backend: backend}, []string{packKey}}
+		cfg.PackSize = 1024
+		cfg.PackFlushInterval = time.Hour
+		cfg.MaxManifests = 100
+	})
+	defer closePackedServer(t, restore)
+	for attempt := 0; attempt < 2; attempt++ {
+		if response := readCacheObject(restore, "/cas/"+digest(body)); response.Code != http.StatusNotFound {
+			t.Fatalf("attempt %d = %d", attempt, response.Code)
+		}
+	}
+	stats := restore.Snapshot()
+	if stats.ManifestsOrphaned != 0 || stats.PackLoadsSkipped != 1 {
+		t.Fatalf("an unrestorable pack was not memoized: %+v", stats)
+	}
+}
+
+func TestPackedStoreDiscoversPacksAndManifests(t *testing.T) {
 	backend := newMemoryBackend()
 	seed := testPackedServer(t, backend)
 	body := []byte("listed payload")
@@ -219,7 +281,7 @@ func TestPackedStoreLimitsDownloadedManifestsWithoutCountingPacks(t *testing.T) 
 	})
 	defer closePackedServer(t, restore)
 	stats := restore.Snapshot()
-	if stats.PacksDiscovered != 3 || stats.ManifestsDiscovered != 2 || stats.ManifestsSkipped != 1 {
+	if stats.PacksDiscovered != 3 || stats.ManifestsDiscovered != 3 || stats.ManifestsSkipped != 1 {
 		t.Fatalf("unexpected bounded-discovery stats: %+v", stats)
 	}
 	for _, body := range payloads {
@@ -228,6 +290,54 @@ func TestPackedStoreLimitsDownloadedManifestsWithoutCountingPacks(t *testing.T) 
 	stats = restore.Snapshot()
 	if stats.Hits != 2 || stats.Misses != 1 {
 		t.Fatalf("max-manifests should bound manifest reads, not the pack listing: %+v", stats)
+	}
+}
+
+func TestPackedStoreDoesNotSpendTheManifestLimitOnOrphans(t *testing.T) {
+	backend := newMemoryBackend()
+	payloads := [][]byte{[]byte("one"), []byte("two"), []byte("three")}
+	packKeys := make(map[string]string, len(payloads))
+	known := make(map[string]bool)
+	for _, body := range payloads {
+		writer := testPackedServer(t, backend)
+		if response := putCacheObject(writer, "/cas/"+digest(body), body); response.Code != http.StatusNoContent {
+			t.Fatalf("CAS PUT = %d", response.Code)
+		}
+		closePackedServer(t, writer)
+		backend.mu.Lock()
+		for key := range backend.objects {
+			if strings.Contains(key, "-car-pack-v1-") && !known[key] {
+				known[key] = true
+				packKeys[string(body)] = key
+			}
+		}
+		backend.mu.Unlock()
+	}
+
+	// Two of the three manifests are orphaned. A budget of one must be spent on
+	// the manifest that can still produce a hit.
+	backend.mu.Lock()
+	delete(backend.objects, packKeys["one"])
+	delete(backend.objects, packKeys["two"])
+	backend.mu.Unlock()
+
+	restore := testServer(t, backend, func(cfg *Config) {
+		cfg.StorageMode = "packs"
+		cfg.Catalog = memoryCatalog{backend: backend}
+		cfg.PackSize = 1024
+		cfg.PackFlushInterval = time.Hour
+		cfg.MaxManifests = 1
+	})
+	defer closePackedServer(t, restore)
+	stats := restore.Snapshot()
+	if stats.ManifestsDiscovered != 3 || stats.ManifestsOrphaned != 2 || stats.ManifestsSkipped != 0 {
+		t.Fatalf("orphans consumed the manifest budget: %+v", stats)
+	}
+	if response := readCacheObject(restore, "/cas/"+digest([]byte("three"))); response.Code != http.StatusOK {
+		t.Fatalf("live manifest was not read: %d", response.Code)
+	}
+	if response := readCacheObject(restore, "/cas/"+digest([]byte("one"))); response.Code != http.StatusNotFound {
+		t.Fatalf("orphaned mapping = %d", response.Code)
 	}
 }
 

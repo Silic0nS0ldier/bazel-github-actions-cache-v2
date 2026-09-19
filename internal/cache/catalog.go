@@ -18,16 +18,9 @@ import (
 // bytes are still restored through the runner cache-v2 service. Listing reads
 // metadata only, so it does not extend an entry's lifetime.
 type Catalog interface {
-	// List returns cache keys starting with keyPrefix, newest first, and how
-	// many matching entries a positive limit left unlisted. UnboundedListing
-	// returns every matching key and always reports zero.
-	List(ctx context.Context, keyPrefix string, limit int) (keys []string, skipped int, err error)
+	// List returns every cache key starting with keyPrefix, newest first.
+	List(ctx context.Context, keyPrefix string) ([]string, error)
 }
-
-// UnboundedListing lists every matching key. Use it only where a missing key
-// changes a decision, because a truncated listing would silently look like
-// absence.
-const UnboundedListing = 0
 
 // ActionsCatalog lists cache metadata through the public GitHub REST API.
 // A normal GITHUB_TOKEN with actions: read is sufficient. It deliberately
@@ -69,23 +62,22 @@ func NewActionsCatalog(timeout time.Duration, logger *log.Logger) (*ActionsCatal
 }
 
 type actionsCacheListResponse struct {
-	TotalCount    int `json:"total_count"`
 	ActionsCaches []struct {
 		Key string `json:"key"`
 	} `json:"actions_caches"`
 }
 
-// List returns cache keys whose immutable key starts with keyPrefix, newest
-// first, and how many matching entries a positive limit left unlisted.
-// Pagination follows the Link header rather than page sizes, so a short page
-// cannot end the listing early and silently hide older DAG parents.
-func (c *ActionsCatalog) List(ctx context.Context, keyPrefix string, limit int) ([]string, int, error) {
+// List returns every cache key whose immutable key starts with keyPrefix,
+// newest first. Pagination follows the Link header rather than page sizes, so
+// a short page cannot end the listing early and silently hide older DAG
+// parents.
+func (c *ActionsCatalog) List(ctx context.Context, keyPrefix string) ([]string, error) {
 	endpoint := *c.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/repos/" + c.repository + "/actions/caches"
 	query := endpoint.Query()
 	query.Set("key", keyPrefix)
-	// Newest first, so a truncated listing keeps the most recent entries
-	// instead of an arbitrary subset.
+	// Newest first, so a caller that reads only part of the listing keeps the
+	// most recent entries rather than an arbitrary subset.
 	query.Set("sort", "created_at")
 	query.Set("direction", "desc")
 	query.Set("per_page", "100")
@@ -94,37 +86,30 @@ func (c *ActionsCatalog) List(ctx context.Context, keyPrefix string, limit int) 
 	next := endpoint.String()
 	keys := make([]string, 0)
 	unexpected := 0
-	seen := 0
 	for next != "" {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
 		if err != nil {
-			return nil, 0, fmt.Errorf("create cache catalog request: %w", err)
+			return nil, fmt.Errorf("create cache catalog request: %w", err)
 		}
 		request.Header.Set("Accept", "application/vnd.github+json")
 		request.Header.Set("Authorization", "Bearer "+c.token)
 		request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 		response, err := c.client.Do(request)
 		if err != nil {
-			return nil, 0, fmt.Errorf("list GitHub Actions caches: %w", err)
+			return nil, fmt.Errorf("list GitHub Actions caches: %w", err)
 		}
 		var result actionsCacheListResponse
 		decodeErr := json.NewDecoder(response.Body).Decode(&result)
 		link := response.Header.Get("Link")
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusOK {
-			return nil, 0, fmt.Errorf("list GitHub Actions caches: HTTP %d", response.StatusCode)
+			return nil, fmt.Errorf("list GitHub Actions caches: HTTP %d", response.StatusCode)
 		}
 		if decodeErr != nil {
-			return nil, 0, fmt.Errorf("decode GitHub Actions cache list: %w", decodeErr)
+			return nil, fmt.Errorf("decode GitHub Actions cache list: %w", decodeErr)
 		}
 		for _, entry := range result.ActionsCaches {
-			matches := strings.HasPrefix(entry.Key, keyPrefix)
-			if matches && limit > UnboundedListing && len(keys) == limit {
-				c.reportUnexpected(keyPrefix, unexpected)
-				return keys, unlistedFrom(result.TotalCount, seen), nil
-			}
-			seen++
-			if !matches {
+			if !strings.HasPrefix(entry.Key, keyPrefix) {
 				// GitHub documents key as an explicit key or prefix, so a
 				// non-matching entry means the filter no longer behaves as this
 				// catalog assumes.
@@ -137,22 +122,11 @@ func (c *ActionsCatalog) List(ctx context.Context, keyPrefix string, limit int) 
 			keys = append(keys, entry.Key)
 		}
 		if next, err = c.nextPageURL(link); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 	}
 	c.reportUnexpected(keyPrefix, unexpected)
-	return keys, 0, nil
-}
-
-// unlistedFrom counts what a limit left behind. total_count covers the whole
-// query rather than one page, so it is a trustworthy remainder only while it
-// exceeds the entries already consumed; otherwise only the entry that tripped
-// the limit is known to be unlisted.
-func unlistedFrom(totalCount, seen int) int {
-	if remaining := totalCount - seen; remaining > 0 {
-		return remaining
-	}
-	return 1
+	return keys, nil
 }
 
 // nextPageURL returns the rel="next" target of a Link header, or an empty

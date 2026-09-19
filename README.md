@@ -89,12 +89,27 @@ publish siblings without overwriting each other. Readers discover and merge all
 heads. If two manifests contain different Action Results for the same action
 digest, that digest is treated as a cache miss rather than picking one result.
 
-Discovery makes two listings: a bounded one for manifests, honouring
-`max-manifests` and newest first, and an unbounded one for packs. A manifest can
-outlive the pack it references, because GitHub evicts entries independently.
-When the pack listing shows that a pack is gone, its entries are resolved as
-ordinary cache misses without attempting a download; `packs_discovered` and
-`pack_loads_skipped` report that in the final statistics.
+Each manifest key names the pack it commits:
+
+```text
+<key-prefix>-car-pack-v1-<pack-sha256>
+<key-prefix>-car-manifest-v2-<pack-sha256>-<manifest-cid>
+```
+
+Discovery lists both namespaces in full, newest first. Listing reads metadata
+only, so it does not renew any entry's retention, and it is the download that is
+worth limiting. Every mapping a manifest introduces lives in the pack its key
+names, so a manifest missing from the pack listing is never downloaded. That
+matters because reading a cache entry renews its retention: a small manifest
+that is read on every run would otherwise outlive the large pack it describes
+indefinitely, and GitHub would keep evicting packs instead. Unread manifests
+simply expire.
+
+`max-manifests` is applied after that filter, so the budget is spent on
+manifests that can still produce a cache hit rather than on orphans.
+`manifests_orphaned`, `manifests_skipped`, and `pack_loads_skipped` report this
+in the final statistics.
+
 Manifest discovery is eventually consistent by design: an unseen manifest is
 only a temporary miss.
 

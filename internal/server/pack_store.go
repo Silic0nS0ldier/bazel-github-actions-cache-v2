@@ -446,7 +446,7 @@ func (p *packStore) flushOneLocked(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := p.publishFile(ctx, manifestKeyFor(p.keyPrefix, manifestID), manifestPath, int64(len(manifestData))); err != nil {
+	if err := p.publishFile(ctx, manifestKeyFor(p.keyPrefix, pack.ID, manifestID), manifestPath, int64(len(manifestData))); err != nil {
 		return false, fmt.Errorf("publish manifest commit point: %w", err)
 	}
 	p.server.stats.manifestUploads.Add(1)
@@ -664,26 +664,27 @@ func filterPending[T any](order []string, values map[string]T) []string {
 	return filtered
 }
 
+// manifestReference is a listed manifest that is still worth downloading.
+type manifestReference struct {
+	key    string
+	packID string
+	id     string
+}
+
 func (p *packStore) discover(ctx context.Context) error {
 	// Listing reads metadata only: unlike a download it does not extend an
-	// entry's lifetime. Manifests are listed first, so the pack listing below
-	// cannot miss a pack that a concurrent writer published before its
-	// manifest.
-	manifestKeys, skipped, err := p.catalog.List(ctx, manifestKeyFor(p.keyPrefix, ""), p.maxManifests)
+	// entry's lifetime, so both listings are unbounded and max-manifests is
+	// spent on downloads instead. Manifests are listed first, so the pack
+	// listing below cannot miss a pack that a concurrent writer published
+	// before its manifest.
+	manifestKeys, err := p.catalog.List(ctx, manifestKeyPrefix(p.keyPrefix))
 	if err != nil {
 		return err
 	}
 	p.server.stats.manifestsDiscovered.Add(uint64(len(manifestKeys)))
-	if skipped > 0 {
-		p.server.stats.manifestsSkipped.Add(uint64(skipped))
-		p.server.cfg.Logger.Printf(
-			"manifest discovery stopped at the max-manifests limit of %d; %d older manifests are treated as cache misses",
-			p.maxManifests, skipped)
-	}
-	// Packs are only witnessed, never read, during discovery. A truncated pack
-	// listing would look like eviction and suppress valid downloads, so it is
-	// bounded by the repository rather than by max-manifests.
-	packKeys, _, err := p.catalog.List(ctx, packKeyFor(p.keyPrefix, ""), cache.UnboundedListing)
+	// A truncated pack listing would look like eviction and suppress valid
+	// downloads, so this one must be complete.
+	packKeys, err := p.catalog.List(ctx, packKeyFor(p.keyPrefix, ""))
 	if err != nil {
 		return err
 	}
@@ -694,20 +695,53 @@ func (p *packStore) discover(ctx context.Context) error {
 	}
 	p.packsListed = true
 	p.server.stats.packsDiscovered.Add(uint64(len(p.listedPacks)))
-	manifests := make(map[string]manifest, len(manifestKeys))
-	parents := make(map[string]struct{})
+
+	live := make([]manifestReference, 0, len(manifestKeys))
+	orphaned := 0
 	for _, key := range manifestKeys {
-		manifestID, ok := parseManifestKey(p.keyPrefix, key)
+		packID, manifestID, ok := parseManifestKey(p.keyPrefix, key)
 		if !ok {
 			continue
 		}
-		value, err := p.loadManifest(ctx, key, manifestID)
-		if err != nil {
-			p.server.stats.manifestLoadErrors.Add(1)
-			p.server.cfg.Logger.Printf("ignoring unavailable manifest %s: %s", manifestID, safeError(err))
+		// Every mapping a manifest introduces lives in the pack named by its
+		// key, so an orphaned manifest has nothing left to offer. Leaving it
+		// unread is what lets it expire instead of being renewed forever.
+		if _, listed := p.listedPacks[packID]; !listed {
+			orphaned++
 			continue
 		}
-		manifests[manifestID] = value
+		live = append(live, manifestReference{key: key, packID: packID, id: manifestID})
+	}
+	if orphaned > 0 {
+		p.server.stats.manifestsOrphaned.Add(uint64(orphaned))
+		p.server.cfg.Logger.Printf("skipped %d manifests whose packs are gone; unread manifests expire on their own", orphaned)
+	}
+	// Applying the limit after the orphan filter keeps the budget on manifests
+	// that can still contribute cache hits.
+	if len(live) > p.maxManifests {
+		skipped := len(live) - p.maxManifests
+		p.server.stats.manifestsSkipped.Add(uint64(skipped))
+		p.server.cfg.Logger.Printf(
+			"%d live manifests exceed the max-manifests limit of %d; the %d oldest are treated as cache misses",
+			len(live), p.maxManifests, skipped)
+		live = live[:p.maxManifests]
+	}
+
+	manifests := make(map[string]manifest, len(live))
+	parents := make(map[string]struct{})
+	for _, reference := range live {
+		value, err := p.loadManifest(ctx, reference.key, reference.id)
+		if err != nil {
+			p.server.stats.manifestLoadErrors.Add(1)
+			p.server.cfg.Logger.Printf("ignoring unavailable manifest %s: %s", reference.id, safeError(err))
+			continue
+		}
+		if len(value.Packs) != 1 || value.Packs[0].ID != reference.packID {
+			p.server.stats.manifestLoadErrors.Add(1)
+			p.server.cfg.Logger.Printf("ignoring manifest %s: it does not commit the pack %s named by its key", reference.id, reference.packID)
+			continue
+		}
+		manifests[reference.id] = value
 		for _, parent := range value.Parents {
 			parents[parent] = struct{}{}
 		}
@@ -774,13 +808,21 @@ func (p *packStore) applyManifestLocked(id string, value manifest) {
 	p.heads[id] = struct{}{}
 }
 
-func parseManifestKey(prefix, key string) (string, bool) {
-	head := manifestKeyFor(prefix, "")
+func parseManifestKey(prefix, key string) (string, string, bool) {
+	head := manifestKeyPrefix(prefix)
 	if len(key) <= len(head) || key[:len(head)] != head {
-		return "", false
+		return "", "", false
 	}
-	id := key[len(head):]
-	return id, validCID(id)
+	rest := key[len(head):]
+	const packIDLength = 64
+	if len(rest) <= packIDLength+1 || rest[packIDLength] != '-' {
+		return "", "", false
+	}
+	packID, manifestID := rest[:packIDLength], rest[packIDLength+1:]
+	if !digestPattern.MatchString(packID) || !validCID(manifestID) {
+		return "", "", false
+	}
+	return packID, manifestID, true
 }
 
 func parsePackKey(prefix, key string) (string, bool) {
