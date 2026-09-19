@@ -20,13 +20,14 @@ import (
 )
 
 type memoryBackend struct {
-	mu        sync.Mutex
-	objects   map[string][]byte
-	loadErr   error
-	existsErr error
-	saveErr   error
-	saves     int
-	loads     int
+	mu          sync.Mutex
+	objects     map[string][]byte
+	loadErr     error
+	existsErr   error
+	saveErr     error
+	saves       int
+	loads       int
+	existsCalls int
 }
 
 type blockingSaveBackend struct {
@@ -74,11 +75,18 @@ func (b *memoryBackend) loadCount() int {
 func (b *memoryBackend) Exists(_ context.Context, key string) (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.existsCalls++
 	if b.existsErr != nil {
 		return false, b.existsErr
 	}
 	_, ok := b.objects[key]
 	return ok, nil
+}
+
+func (b *memoryBackend) existsCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.existsCalls
 }
 
 func (b *memoryBackend) Save(_ context.Context, key string, src *os.File, size int64) error {

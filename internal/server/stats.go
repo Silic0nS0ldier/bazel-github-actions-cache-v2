@@ -29,6 +29,7 @@ type Stats struct {
 	ManifestUploads            uint64 `json:"manifest_uploads"`
 	PackDownloads              uint64 `json:"pack_downloads"`
 	PackLoadsSkipped           uint64 `json:"pack_loads_skipped"`
+	PackRenewals               uint64 `json:"pack_renewals"`
 	PacksDiscovered            uint64 `json:"packs_discovered"`
 	ManifestsDiscovered        uint64 `json:"manifests_discovered"`
 	ManifestsSkipped           uint64 `json:"manifests_skipped"`
@@ -61,6 +62,7 @@ type counters struct {
 	manifestUploads            atomic.Uint64
 	packDownloads              atomic.Uint64
 	packLoadsSkipped           atomic.Uint64
+	packRenewals               atomic.Uint64
 	packsDiscovered            atomic.Uint64
 	manifestsDiscovered        atomic.Uint64
 	manifestsSkipped           atomic.Uint64
@@ -94,6 +96,7 @@ func (c *counters) snapshot() Stats {
 		ManifestUploads:            c.manifestUploads.Load(),
 		PackDownloads:              c.packDownloads.Load(),
 		PackLoadsSkipped:           c.packLoadsSkipped.Load(),
+		PackRenewals:               c.packRenewals.Load(),
 		PacksDiscovered:            c.packsDiscovered.Load(),
 		ManifestsDiscovered:        c.manifestsDiscovered.Load(),
 		ManifestsSkipped:           c.manifestsSkipped.Load(),

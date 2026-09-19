@@ -147,12 +147,16 @@ merge.
 
 1. Bootstrap an in-memory manifest view from all discoverable heads. Manifests
    whose pack is absent from the pack listing are skipped without being read.
-2. For `GET /ac/<action-digest>`, resolve the Action Result mapping, restore its
-   pack, and validate every declared closure pack and referenced CAS digest.
+2. For `GET /ac/<action-digest>`, resolve the Action Result mapping and restore
+   its pack, then confirm every declared closure member is mapped to a pack
+   that still exists and has the declared size. Closure packs are not restored;
+   their retention is renewed instead.
 3. For `GET /cas/<digest>`, resolve its pack, restore it on demand, look up the
    CID in the CARv2 index, and verify digest and size before responding.
 4. If a manifest, pack, or closure member is missing or fails verification,
    return a cache miss.
+5. A CAS presence check resolves from the manifest view without restoring the
+   pack, and schedules one deferred retention renewal for it.
 
 GitHub can evict any cache entry independently. The manifest must therefore not
 be treated as a promise that a pack still exists. This retains the v0.2 safety
