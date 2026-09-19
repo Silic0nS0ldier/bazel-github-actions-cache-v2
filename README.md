@@ -118,9 +118,9 @@ pack, so `--remote_download_minimal` builds do not pull archives they never
 read. Because reading an entry is what resets its retention, a pack that only
 ever answers presence checks would then be evicted while Bazel still depends on
 it. The server therefore renews it explicitly: once per pack per job, batched
-for 15 seconds so a pack that gets downloaded in the meantime costs no extra API
-call, and flushed at shutdown. A renewal resolves cache metadata without
-transferring the pack, and is reported as `pack_renewals`.
+for `pack-renew-seconds` so a pack that gets downloaded in the meantime costs no
+extra API call, and flushed at shutdown. A renewal resolves cache metadata
+without transferring the pack, and is reported as `pack_renewals`.
 
 Action results use the same presence check. `GET /ac/<digest>` restores only the
 pack holding the result itself, then confirms every referenced blob is mapped to
@@ -175,6 +175,7 @@ Do not enable Bazel remote-cache compression with this release.
 | `storage-mode` | `objects` | `objects` (v0.2) or `packs` (CARv2 and manifest DAG) |
 | `pack-size-mb` | `8` | Target size for a CARv2 archive; only for `packs`, 1–32 MiB |
 | `pack-flush-seconds` | `30` | Maximum local staging interval; only for `packs` |
+| `pack-renew-seconds` | `15` | Batching delay for pack retention renewals; only for `packs` |
 | `max-manifests` | `2048` | Maximum manifests downloaded during discovery; only for `packs` |
 | `github-token` | `${{ github.token }}` | `actions: read` token for packed-manifest discovery |
 | `max-blob-size-mb` | `512` | Maximum spooled upload/download size |
