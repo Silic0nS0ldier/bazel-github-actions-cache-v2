@@ -9,6 +9,7 @@ require (
 	github.com/ipld/go-ipld-prime v0.24.0
 	github.com/multiformats/go-multihash v0.2.3
 	github.com/tonistiigi/go-actions-cache v0.0.0-20260120203934-54bc28c26fd2
+	lukechampine.com/blake3 v1.4.1
 )
 
 require (
@@ -50,5 +51,4 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
-	lukechampine.com/blake3 v1.4.1 // indirect
 )

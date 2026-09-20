@@ -2,11 +2,14 @@ package server
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -15,6 +18,7 @@ import (
 
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc/codes"
+	"lukechampine.com/blake3"
 
 	remoteasset "github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/asset/v1"
 	remoteexecution "github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/execution/v2"
@@ -25,10 +29,34 @@ import (
 // ignored so that no credential is forwarded to an origin on a caller's behalf.
 const checksumQualifier = "checksum.sri"
 
-const sha256SRIPrefix = "sha256-"
+const sha256Algorithm = "sha256"
+
+const blake3DigestSize = 32
 
 // maxAssetRedirects bounds a redirect chain from an asset origin.
 const maxAssetRedirects = 10
+
+// checksumAlgorithms are the Subresource Integrity algorithms Bazel can emit. A
+// weak one is accepted because it only has to match what the caller declared;
+// content is stored under its sha256 either way, and Bazel verifies the same
+// checksum itself after the download.
+var checksumAlgorithms = map[string]func() hash.Hash{
+	"sha1":          sha1.New,
+	sha256Algorithm: sha256.New,
+	"sha384":        sha512.New384,
+	"sha512":        sha512.New,
+	"blake3":        func() hash.Hash { return blake3.New(blake3DigestSize, nil) },
+}
+
+// assetChecksum is the content hash a caller declared for an asset.
+type assetChecksum struct {
+	algorithm string
+	hash      string
+}
+
+func (c assetChecksum) String() string {
+	return c.algorithm + "-" + c.hash
+}
 
 func defaultAssetClient() *http.Client {
 	return &http.Client{
@@ -49,7 +77,7 @@ type assetService struct {
 	server *Server
 }
 
-// FetchBlob backs Bazel's --remote_downloader, which caches the archives that
+// FetchBlob backs Bazel's remote downloader, which caches the archives that
 // repository rules download. Bazel never pushes those blobs back, so a hit is
 // only ever possible if this server fetched the asset itself the first time.
 func (a *assetService) FetchBlob(
@@ -64,24 +92,25 @@ func (a *assetService) FetchBlob(
 	}
 	s := a.server
 	s.stats.requests.Add(1)
+	uris := request.GetUris()
 
-	hash, err := checksumFromQualifiers(request.GetQualifiers())
+	checksum, err := parseChecksum(request.GetQualifiers())
 	if err != nil {
-		return fetchFailure(err), nil
+		return fetchFailure(uris, err), nil
 	}
 	// Bazel sets this to a future timestamp when a repository rule declares no
 	// checksum, precisely to forbid cached content. Nothing here records when an
 	// asset was fetched, so the honest answer is always a miss.
 	if request.HasOldestContentAccepted() {
-		return fetchFailure(errors.New("this server cannot attest to when an asset was fetched")), nil
+		return fetchFailure(uris, errors.New("this cache cannot attest to when content was fetched")), nil
 	}
 
-	if reference, found := s.cachedAsset(ctx, hash); found {
+	if reference, found := s.cachedAsset(ctx, checksum); found {
 		return fetchSuccess("", reference), nil
 	}
-	uri, reference, err := s.fetchAsset(ctx, request.GetUris(), hash)
+	uri, reference, err := s.fetchAsset(ctx, uris, checksum)
 	if err != nil {
-		return fetchFailure(err), nil
+		return fetchFailure(uris, err), nil
 	}
 	return fetchSuccess(uri, reference), nil
 }
@@ -96,11 +125,26 @@ func fetchSuccess(uri string, reference digestReference) *remoteasset.FetchBlobR
 }
 
 // fetchFailure reports a miss inside the response, which is where the Remote
-// Asset API puts per-asset outcomes.
-func fetchFailure(err error) *remoteasset.FetchBlobResponse {
+// Asset API puts per-asset outcomes. Bazel logs the message on its own, without
+// saying which download produced it, so the resource is always named here.
+func fetchFailure(uris []string, err error) *remoteasset.FetchBlobResponse {
 	return remoteasset.FetchBlobResponse_builder{
-		Status: &statuspb.Status{Code: int32(codes.NotFound), Message: safeError(err)},
+		Status: &statuspb.Status{
+			Code:    int32(codes.NotFound),
+			Message: fmt.Sprintf("%s: %s", describeAssets(uris), safeError(err)),
+		},
 	}.Build()
+}
+
+func describeAssets(uris []string) string {
+	if len(uris) == 0 {
+		return "asset with no uri"
+	}
+	described := safeURIString(uris[0])
+	if len(uris) > 1 {
+		described = fmt.Sprintf("%s (and %d more)", described, len(uris)-1)
+	}
+	return described
 }
 
 func digestProtoFor(reference digestReference) *remoteexecution.Digest {
@@ -110,72 +154,96 @@ func digestProtoFor(reference digestReference) *remoteexecution.Digest {
 	}.Build()
 }
 
-// checksumFromQualifiers decodes checksum.sri, which Bazel sends as Subresource
-// Integrity rather than hex.
-func checksumFromQualifiers(qualifiers []*remoteasset.Qualifier) (string, error) {
+// parseChecksum decodes checksum.sri, which Bazel sends as Subresource Integrity
+// rather than hex.
+func parseChecksum(qualifiers []*remoteasset.Qualifier) (assetChecksum, error) {
 	for _, qualifier := range qualifiers {
 		if qualifier.GetName() != checksumQualifier {
 			continue
 		}
-		encoded, ok := strings.CutPrefix(qualifier.GetValue(), sha256SRIPrefix)
-		if !ok {
-			return "", fmt.Errorf("only %s checksums are supported", sha256SRIPrefix)
+		value := qualifier.GetValue()
+		algorithm, encoded, found := strings.Cut(value, "-")
+		if !found || algorithm == "" || encoded == "" {
+			return assetChecksum{}, fmt.Errorf("%s %q is not subresource integrity", checksumQualifier, value)
+		}
+		newHash, supported := checksumAlgorithms[algorithm]
+		if !supported {
+			return assetChecksum{}, fmt.Errorf("checksum algorithm %q is not supported", algorithm)
 		}
 		sum, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil || len(sum) != sha256.Size {
-			return "", fmt.Errorf("%s is not a base64 SHA-256 digest", checksumQualifier)
+		if err != nil {
+			return assetChecksum{}, fmt.Errorf("%s %q is not base64", checksumQualifier, value)
 		}
-		return hex.EncodeToString(sum), nil
+		if size := newHash().Size(); len(sum) != size {
+			return assetChecksum{}, fmt.Errorf(
+				"%s %q decodes to %d bytes, not the %d a %s digest needs",
+				checksumQualifier, value, len(sum), size, algorithm,
+			)
+		}
+		return assetChecksum{algorithm: algorithm, hash: hex.EncodeToString(sum)}, nil
 	}
-	return "", fmt.Errorf("a %s qualifier is required to cache an asset", checksumQualifier)
+	return assetChecksum{}, errors.New("no checksum was declared, so the download cannot be cached")
 }
 
-// cachedAsset resolves the asset from the cache. Resolving rather than probing
-// is deliberate: the client reads the blob over ByteStream immediately
-// afterwards, so this both learns the size and warms the local copy.
-func (s *Server) cachedAsset(ctx context.Context, hash string) (digestReference, bool) {
-	if hash == emptySHA256Digest {
-		s.implicitEmptyCASHit()
-		return digestReference{hash: hash}, true
+// cachedAsset resolves the asset from the cache. A sha256 checksum addresses the
+// content store directly; anything else has to go through an alias recorded when
+// the asset was first fetched.
+func (s *Server) cachedAsset(ctx context.Context, checksum assetChecksum) (digestReference, bool) {
+	if checksum.algorithm != sha256Algorithm {
+		return s.loadAlias(ctx, checksum)
 	}
-	object, err := s.readObject(ctx, "cas", hash)
+	if checksum.hash == emptySHA256Digest {
+		s.implicitEmptyCASHit()
+		return digestReference{hash: checksum.hash}, true
+	}
+	// Resolving rather than probing is deliberate: the client reads the blob over
+	// ByteStream immediately afterwards, so this both learns the size and warms
+	// the local copy.
+	object, err := s.readObject(ctx, "cas", checksum.hash)
 	if err != nil {
 		return digestReference{}, false
 	}
-	return digestReference{hash: hash, size: object.size}, true
+	return digestReference{hash: checksum.hash, size: object.size}, true
 }
 
 func (s *Server) fetchAsset(
 	ctx context.Context,
 	uris []string,
-	hash string,
+	checksum assetChecksum,
 ) (string, digestReference, error) {
 	if len(uris) == 0 {
 		return "", digestReference{}, errors.New("no uris were supplied")
 	}
 	var last error
 	for _, uri := range uris {
-		reference, err := s.fetchAssetFrom(ctx, uri, hash)
+		reference, err := s.fetchAssetFrom(ctx, uri, checksum)
 		if err == nil {
 			return uri, reference, nil
 		}
 		s.stats.assetFetchErrors.Add(1)
-		s.cfg.Logger.Printf("fetching asset failed: %s", safeError(err))
+		s.cfg.Logger.Printf("fetching %s failed: %s", safeURIString(uri), safeError(err))
 		last = err
+	}
+	if len(uris) > 1 {
+		return "", digestReference{}, fmt.Errorf("all %d uris failed, last: %w", len(uris), last)
 	}
 	return "", digestReference{}, last
 }
 
-func (s *Server) fetchAssetFrom(ctx context.Context, uri, hash string) (digestReference, error) {
+func (s *Server) fetchAssetFrom(
+	ctx context.Context,
+	uri string,
+	checksum assetChecksum,
+) (digestReference, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
 		return digestReference{}, errors.New("uri is not a valid URL")
 	}
 	if parsed.Scheme != "https" {
-		return digestReference{}, fmt.Errorf("refusing to fetch %s over %q", safeURI(parsed), parsed.Scheme)
+		return digestReference{}, fmt.Errorf("refusing to fetch over %q", parsed.Scheme)
 	}
 
-	path, size, err := s.downloadAsset(ctx, uri, parsed, hash)
+	path, reference, err := s.downloadAsset(ctx, uri, checksum)
 	if err != nil {
 		return digestReference{}, err
 	}
@@ -186,22 +254,29 @@ func (s *Server) fetchAssetFrom(ctx context.Context, uri, hash string) (digestRe
 		return digestReference{}, fmt.Errorf("reopen fetched asset: %w", err)
 	}
 	defer file.Close()
-	if err := s.writeObject(ctx, "cas", hash, file, size); err != nil {
+	if err := s.writeObject(ctx, "cas", reference.hash, file, reference.size); err != nil {
 		return digestReference{}, fmt.Errorf("publish fetched asset: %w", err)
 	}
-	return digestReference{hash: hash, size: size}, nil
+	if checksum.algorithm != sha256Algorithm {
+		// The blob is cached either way; without the alias the next build simply
+		// fetches it again, so this must not fail the request.
+		if err := s.saveAlias(ctx, checksum, reference); err != nil {
+			s.cfg.Logger.Printf("recording %s alias failed: %s", checksum.algorithm, safeError(err))
+		}
+	}
+	return reference, nil
 }
 
-// downloadAsset streams an origin response to a spool file and accepts it only
-// if it hashes to the digest the caller asked for.
+// downloadAsset streams an origin response to a spool file, accepts it only if
+// it matches the checksum the caller declared, and reports the sha256 digest the
+// content is stored under.
 func (s *Server) downloadAsset(
 	ctx context.Context,
 	uri string,
-	parsed *url.URL,
-	hash string,
-) (string, int64, error) {
+	checksum assetChecksum,
+) (string, digestReference, error) {
 	if err := s.acquire(ctx); err != nil {
-		return "", 0, err
+		return "", digestReference{}, err
 	}
 	defer s.release()
 
@@ -209,21 +284,21 @@ func (s *Server) downloadAsset(
 	defer cancel()
 	request, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, uri, nil)
 	if err != nil {
-		return "", 0, errors.New("uri cannot be requested")
+		return "", digestReference{}, errors.New("uri cannot be requested")
 	}
 	response, err := s.cfg.AssetClient.Do(request)
 	if err != nil {
-		return "", 0, fmt.Errorf("fetch %s: %w", safeURI(parsed), err)
+		return "", digestReference{}, fmt.Errorf("fetch failed: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("fetch %s: HTTP %d", safeURI(parsed), response.StatusCode)
+		return "", digestReference{}, fmt.Errorf("origin returned HTTP %d", response.StatusCode)
 	}
 	s.stats.assetDownloads.Add(1)
 
 	file, err := os.CreateTemp(s.cfg.CacheDir, "asset-*")
 	if err != nil {
-		return "", 0, fmt.Errorf("create asset spool: %w", err)
+		return "", digestReference{}, fmt.Errorf("create asset spool: %w", err)
 	}
 	path := file.Name()
 	defer file.Close()
@@ -234,27 +309,45 @@ func (s *Server) downloadAsset(
 		}
 	}()
 
-	hasher := sha256.New()
+	// Storage is addressed by sha256 whatever the caller declared, so the content
+	// is hashed twice unless those happen to be the same function.
+	canonical := sha256.New()
+	declared := canonical
+	writers := []io.Writer{file, canonical}
+	if checksum.algorithm != sha256Algorithm {
+		declared = checksumAlgorithms[checksum.algorithm]()
+		writers = append(writers, declared)
+	}
+
 	limit := s.cfg.MaxBlobSize
-	size, err := io.Copy(io.MultiWriter(file, hasher), io.LimitReader(response.Body, limit+1))
+	size, err := io.Copy(io.MultiWriter(writers...), io.LimitReader(response.Body, limit+1))
 	if err != nil {
-		return "", 0, fmt.Errorf("fetch %s: %w", safeURI(parsed), err)
+		return "", digestReference{}, fmt.Errorf("fetch failed: %w", err)
 	}
 	if size > limit {
-		return "", 0, fmt.Errorf("%s exceeds the configured maximum size", safeURI(parsed))
+		return "", digestReference{}, errors.New("content exceeds the configured maximum size")
 	}
-	if actual := hex.EncodeToString(hasher.Sum(nil)); actual != hash {
-		return "", 0, fmt.Errorf("%s hashes to %s, not the requested %s", safeURI(parsed), actual, hash)
+	actual := assetChecksum{algorithm: checksum.algorithm, hash: hex.EncodeToString(declared.Sum(nil))}
+	if actual != checksum {
+		return "", digestReference{}, fmt.Errorf("content is %s, not the requested %s", actual, checksum)
 	}
 	if err := file.Sync(); err != nil {
-		return "", 0, fmt.Errorf("sync asset spool: %w", err)
+		return "", digestReference{}, fmt.Errorf("sync asset spool: %w", err)
 	}
 	keep = true
-	return path, size, nil
+	return path, digestReference{hash: hex.EncodeToString(canonical.Sum(nil)), size: size}, nil
 }
 
 // safeURI drops the credentials and query string a URI may carry before it
 // reaches a log line or an error returned to the caller.
 func safeURI(parsed *url.URL) string {
 	return parsed.Scheme + "://" + parsed.Host + parsed.Path
+}
+
+func safeURIString(uri string) string {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return "malformed uri"
+	}
+	return safeURI(parsed)
 }

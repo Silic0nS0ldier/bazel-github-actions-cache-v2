@@ -22,7 +22,18 @@ func futureTimestamp() *timestamppb.Timestamp {
 
 func subresourceIntegrity(data []byte) string {
 	sum := sha256.Sum256(data)
-	return sha256SRIPrefix + base64.StdEncoding.EncodeToString(sum[:])
+	return sha256Algorithm + "-" + base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func integrityWith(t *testing.T, algorithm string, data []byte) string {
+	t.Helper()
+	newHash, ok := checksumAlgorithms[algorithm]
+	if !ok {
+		t.Fatalf("unknown algorithm %q", algorithm)
+	}
+	hasher := newHash()
+	hasher.Write(data)
+	return algorithm + "-" + base64.StdEncoding.EncodeToString(hasher.Sum(nil))
 }
 
 func checksumQualifiers(value string) []*remoteasset.Qualifier {
@@ -150,6 +161,173 @@ func TestFetchBlobRejectsContentThatFailsItsChecksum(t *testing.T) {
 	}
 }
 
+// These messages surface to users as "WARNING: Remote Cache: NOT_FOUND: ...",
+// often once per download, so they have to explain themselves on one line.
+func TestChecksumRejectionsExplainThemselves(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{
+			name:  "unknown algorithm",
+			value: "md5-" + base64.StdEncoding.EncodeToString(make([]byte, 16)),
+			want:  `checksum algorithm "md5" is not supported`,
+		},
+		{
+			name:  "not subresource integrity",
+			value: "deadbeef",
+			want:  `checksum.sri "deadbeef" is not subresource integrity`,
+		},
+		{
+			name:  "empty",
+			value: "",
+			want:  `checksum.sri "" is not subresource integrity`,
+		},
+		{
+			name:  "not base64",
+			value: "sha256-not base64!",
+			want:  `checksum.sri "sha256-not base64!" is not base64`,
+		},
+		{
+			name:  "wrong digest length",
+			value: "sha256-" + base64.StdEncoding.EncodeToString([]byte("short")),
+			want:  `checksum.sri "sha256-c2hvcnQ=" decodes to 5 bytes, not the 32 a sha256 digest needs`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseChecksum(checksumQualifiers(test.value))
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	_, err := parseChecksum(nil)
+	want := "no checksum was declared, so the download cannot be cached"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+// Bazel reports the message without saying which download produced it.
+func TestFetchFailuresNameTheResource(t *testing.T) {
+	server := assetServer(t, newMemoryBackend(), nil)
+
+	response := fetchBlob(t, server, remoteasset.FetchBlobRequest_builder{
+		Uris:       []string{"https://example.invalid/pkg.tgz?token=secret"},
+		Qualifiers: checksumQualifiers("deadbeef"),
+	}.Build())
+	message := response.GetStatus().GetMessage()
+	want := `https://example.invalid/pkg.tgz: checksum.sri "deadbeef" is not subresource integrity`
+	if message != want {
+		t.Fatalf("message = %q, want %q", message, want)
+	}
+
+	// Several mirrors still name one resource, and never a query string.
+	response = fetchBlob(t, server, remoteasset.FetchBlobRequest_builder{
+		Uris: []string{
+			"https://example.invalid/a.tgz?sig=secret",
+			"https://mirror.invalid/a.tgz",
+		},
+		Qualifiers: checksumQualifiers("deadbeef"),
+	}.Build())
+	message = response.GetStatus().GetMessage()
+	if !strings.HasPrefix(message, "https://example.invalid/a.tgz (and 1 more): ") {
+		t.Fatalf("message = %q", message)
+	}
+	if strings.Contains(message, "secret") {
+		t.Fatalf("message leaked a query string: %q", message)
+	}
+}
+
+// npm integrity is sha512, so without alias support none of it could be cached.
+func TestFetchBlobCachesAssetsDeclaredWithAnyChecksum(t *testing.T) {
+	asset := []byte("a package tarball from a registry")
+	reference := referenceFor(asset)
+
+	for _, algorithm := range []string{"sha1", "sha256", "sha384", "sha512", "blake3"} {
+		t.Run(algorithm, func(t *testing.T) {
+			backend := newMemoryBackend()
+			origin, requests := assetOrigin(t, asset)
+			server := assetServer(t, backend, origin)
+			request := remoteasset.FetchBlobRequest_builder{
+				Uris:       []string{origin.URL + "/pkg.tgz"},
+				Qualifiers: checksumQualifiers(integrityWith(t, algorithm, asset)),
+			}.Build()
+
+			response := fetchBlob(t, server, request)
+			if code := codes.Code(response.GetStatus().GetCode()); code != codes.OK {
+				t.Fatalf("status = %s (%s)", code, response.GetStatus().GetMessage())
+			}
+			// Whatever the caller declared, the blob is addressed by sha256.
+			if got := response.GetBlobDigest().GetHash(); got != reference.hash {
+				t.Fatalf("blob digest = %s, want %s", got, reference.hash)
+			}
+			if got := backend.objects["test-v1-cas-"+reference.hash]; string(got) != string(asset) {
+				t.Fatalf("asset was not published: %q", got)
+			}
+
+			second := fetchBlob(t, server, request)
+			if code := codes.Code(second.GetStatus().GetCode()); code != codes.OK {
+				t.Fatalf("second fetch = %s", second.GetStatus().GetMessage())
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("origin was contacted %d times, want 1", requests.Load())
+			}
+		})
+	}
+}
+
+// Packed mode is the interesting case for aliases: they must travel in a CARv2
+// pack rather than costing one Actions-cache creation each, and must survive a
+// fresh runner that only has the published manifests.
+func TestAssetAliasSurvivesAPackedRoundTrip(t *testing.T) {
+	asset := []byte("a registry tarball addressed by sha512")
+	reference := referenceFor(asset)
+	backend := newMemoryBackend()
+	origin, requests := assetOrigin(t, asset)
+	request := remoteasset.FetchBlobRequest_builder{
+		Uris:       []string{origin.URL + "/pkg.tgz"},
+		Qualifiers: checksumQualifiers(integrityWith(t, "sha512", asset)),
+	}.Build()
+
+	seed := testServer(t, backend, func(cfg *Config) {
+		cfg.StorageMode = "packs"
+		cfg.Catalog = memoryCatalog{backend: backend}
+		cfg.PackSize = 1024
+		cfg.PackFlushInterval = time.Hour
+		cfg.MaxManifests = 16
+		cfg.AssetClient = origin.Client()
+	})
+	if response := fetchBlob(t, seed, request); codes.Code(response.GetStatus().GetCode()) != codes.OK {
+		t.Fatalf("seed fetch = %s", response.GetStatus().GetMessage())
+	}
+	closePackedServer(t, seed)
+	if stats := seed.Snapshot(); stats.PackUploads == 0 || stats.ManifestUploads == 0 {
+		t.Fatalf("nothing was published: %+v", stats)
+	}
+
+	restored := testServer(t, backend, func(cfg *Config) {
+		cfg.StorageMode = "packs"
+		cfg.Catalog = memoryCatalog{backend: backend}
+		cfg.PackSize = 1024
+		cfg.PackFlushInterval = time.Hour
+		cfg.MaxManifests = 16
+		cfg.AssetClient = origin.Client()
+	})
+	response := fetchBlob(t, restored, request)
+	if code := codes.Code(response.GetStatus().GetCode()); code != codes.OK {
+		t.Fatalf("restored fetch = %s (%s)", code, response.GetStatus().GetMessage())
+	}
+	if got := response.GetBlobDigest().GetHash(); got != reference.hash {
+		t.Fatalf("blob digest = %s, want %s", got, reference.hash)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("origin was contacted %d times, want 1", requests.Load())
+	}
+}
+
 func TestFetchBlobRefusesUnverifiableOrInsecureRequests(t *testing.T) {
 	asset := []byte("an archive")
 	origin, requests := assetOrigin(t, asset)
@@ -163,9 +341,9 @@ func TestFetchBlobRefusesUnverifiableOrInsecureRequests(t *testing.T) {
 			mutate: func(b *remoteasset.FetchBlobRequest_builder) { b.Qualifiers = nil },
 		},
 		{
-			name: "checksum in another algorithm",
+			name: "checksum in an unknown algorithm",
 			mutate: func(b *remoteasset.FetchBlobRequest_builder) {
-				b.Qualifiers = checksumQualifiers("sha512-" + strings.Repeat("A", 88))
+				b.Qualifiers = checksumQualifiers("md5-" + strings.Repeat("A", 24))
 			},
 		},
 		{
