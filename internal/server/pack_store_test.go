@@ -16,7 +16,7 @@ type memoryCatalog struct {
 	backend *memoryBackend
 }
 
-func (c memoryCatalog) List(_ context.Context, prefix string, limit int) ([]string, bool, error) {
+func (c memoryCatalog) List(_ context.Context, prefix string, limit int) ([]string, int, error) {
 	c.backend.mu.Lock()
 	defer c.backend.mu.Unlock()
 	keys := make([]string, 0)
@@ -27,9 +27,9 @@ func (c memoryCatalog) List(_ context.Context, prefix string, limit int) ([]stri
 	}
 	sort.Strings(keys)
 	if limit > cache.UnboundedListing && len(keys) > limit {
-		return keys[:limit], true, nil
+		return keys[:limit], len(keys) - limit, nil
 	}
-	return keys, false, nil
+	return keys, 0, nil
 }
 
 var _ cache.Catalog = memoryCatalog{}
@@ -219,7 +219,7 @@ func TestPackedStoreLimitsDownloadedManifestsWithoutCountingPacks(t *testing.T) 
 	})
 	defer closePackedServer(t, restore)
 	stats := restore.Snapshot()
-	if stats.PacksDiscovered != 3 || stats.ManifestsDiscovered != 2 || !stats.ManifestDiscoveryTruncated {
+	if stats.PacksDiscovered != 3 || stats.ManifestsDiscovered != 2 || stats.ManifestsSkipped != 1 {
 		t.Fatalf("unexpected bounded-discovery stats: %+v", stats)
 	}
 	for _, body := range payloads {

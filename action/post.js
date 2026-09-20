@@ -77,7 +77,7 @@ async function post() {
       `| Unavailable packs skipped | ${stats.pack_loads_skipped ?? 0} |`,
       `| Packs discovered | ${stats.packs_discovered ?? 0} |`,
       `| Manifests discovered | ${stats.manifests_discovered ?? 0} |`,
-      `| Manifest discovery truncated | ${stats.manifest_discovery_truncated ? "yes" : "no"} |`,
+      `| Manifests skipped | ${stats.manifests_skipped ?? 0} |`,
       `| Action-digest conflicts | ${stats.action_digest_conflicts ?? 0} |`,
       `| Read-only discarded uploads | ${stats.discarded_uploads ?? 0} |`,
       `| Backend downloads | ${stats.backend_downloads ?? 0} |`,

@@ -31,7 +31,7 @@ type Stats struct {
 	PackLoadsSkipped           uint64 `json:"pack_loads_skipped"`
 	PacksDiscovered            uint64 `json:"packs_discovered"`
 	ManifestsDiscovered        uint64 `json:"manifests_discovered"`
-	ManifestDiscoveryTruncated bool   `json:"manifest_discovery_truncated"`
+	ManifestsSkipped           uint64 `json:"manifests_skipped"`
 	ManifestDiscoveryErrors    uint64 `json:"manifest_discovery_errors"`
 	ManifestLoadErrors         uint64 `json:"manifest_load_errors"`
 	ActionDigestConflicts      uint64 `json:"action_digest_conflicts"`
@@ -62,7 +62,7 @@ type counters struct {
 	packLoadsSkipped           atomic.Uint64
 	packsDiscovered            atomic.Uint64
 	manifestsDiscovered        atomic.Uint64
-	manifestDiscoveryTruncated atomic.Bool
+	manifestsSkipped           atomic.Uint64
 	manifestDiscoveryErrors    atomic.Uint64
 	manifestLoadErrors         atomic.Uint64
 	actionDigestConflicts      atomic.Uint64
@@ -94,7 +94,7 @@ func (c *counters) snapshot() Stats {
 		PackLoadsSkipped:           c.packLoadsSkipped.Load(),
 		PacksDiscovered:            c.packsDiscovered.Load(),
 		ManifestsDiscovered:        c.manifestsDiscovered.Load(),
-		ManifestDiscoveryTruncated: c.manifestDiscoveryTruncated.Load(),
+		ManifestsSkipped:           c.manifestsSkipped.Load(),
 		ManifestDiscoveryErrors:    c.manifestDiscoveryErrors.Load(),
 		ManifestLoadErrors:         c.manifestLoadErrors.Load(),
 		ActionDigestConflicts:      c.actionDigestConflicts.Load(),

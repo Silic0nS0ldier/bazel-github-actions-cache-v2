@@ -11,27 +11,33 @@ import (
 	"testing"
 )
 
-func TestActionsCatalogListsAllPagesWithinPrefix(t *testing.T) {
+func TestActionsCatalogFollowsShortPagesToTheFinalLink(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		if got := r.Header.Get("Authorization"); got != "Bearer token" {
-			t.Fatalf("authorization = %q", got)
+			t.Errorf("authorization = %q", got)
 		}
-		if got := r.URL.Query().Get("key"); got != "prefix-manifest-" {
-			t.Fatalf("key = %q", got)
+		query := r.URL.Query()
+		if got := query.Get("key"); got != "prefix-manifest-" {
+			t.Errorf("key = %q", got)
 		}
-		if got := r.URL.Query().Get("sort"); got != "created_at" {
-			t.Fatalf("sort = %q", got)
+		if got := query.Get("sort"); got != "created_at" {
+			t.Errorf("sort = %q", got)
 		}
-		if got := r.URL.Query().Get("direction"); got != "desc" {
-			t.Fatalf("direction = %q", got)
+		if got := query.Get("direction"); got != "desc" {
+			t.Errorf("direction = %q", got)
 		}
-		if r.URL.Query().Get("page") == "1" {
-			_, _ = w.Write([]byte(`{"actions_caches":[{"key":"prefix-manifest-one"}]}`))
+		// A page far shorter than per_page must not end the listing while the
+		// server still advertises a next page.
+		if query.Get("page") != "2" {
+			query.Set("page", "2")
+			next := "http://" + r.Host + "/repos/owner/repository/actions/caches?" + query.Encode()
+			w.Header().Set("Link", `<`+next+`>; rel="next", <`+next+`>; rel="last"`)
+			_, _ = w.Write([]byte(`{"total_count":2,"actions_caches":[{"key":"prefix-manifest-one"}]}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"actions_caches":[]}`))
+		_, _ = w.Write([]byte(`{"total_count":2,"actions_caches":[{"key":"prefix-manifest-two"}]}`))
 	}))
 	defer server.Close()
 	baseURL, err := url.Parse(server.URL)
@@ -39,18 +45,19 @@ func TestActionsCatalogListsAllPagesWithinPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog := &ActionsCatalog{baseURL: baseURL, repository: "owner/repository", token: "token", client: server.Client()}
-	keys, truncated, err := catalog.List(context.Background(), "prefix-manifest-", 10)
+	keys, skipped, err := catalog.List(context.Background(), "prefix-manifest-", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(keys, ",") != "prefix-manifest-one" || truncated || requests != 1 {
-		t.Fatalf("keys/truncated/requests = %v/%t/%d", keys, truncated, requests)
+	if strings.Join(keys, ",") != "prefix-manifest-one,prefix-manifest-two" || skipped != 0 || requests != 2 {
+		t.Fatalf("keys/skipped/requests = %v/%d/%d", keys, skipped, requests)
 	}
 }
 
-func TestActionsCatalogTruncatesAtLimitAndListsUnbounded(t *testing.T) {
+func TestActionsCatalogRejectsPaginationLinkToAnotherHost(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"actions_caches":[{"key":"prefix-one"},{"key":"prefix-two"}]}`))
+		w.Header().Set("Link", `<https://attacker.example/repos/owner/repository/actions/caches?page=2>; rel="next"`)
+		_, _ = w.Write([]byte(`{"total_count":1,"actions_caches":[{"key":"prefix-one"}]}`))
 	}))
 	defer server.Close()
 	baseURL, err := url.Parse(server.URL)
@@ -58,19 +65,44 @@ func TestActionsCatalogTruncatesAtLimitAndListsUnbounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog := &ActionsCatalog{baseURL: baseURL, repository: "owner/repository", token: "token", client: server.Client()}
-	keys, truncated, err := catalog.List(context.Background(), "prefix-", 1)
+	if _, _, err := catalog.List(context.Background(), "prefix-", UnboundedListing); err == nil {
+		t.Fatal("pagination followed a link to another host")
+	}
+}
+
+func TestActionsCatalogReportsUnlistedCountAtLimit(t *testing.T) {
+	totalCount := "5"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"total_count":` + totalCount + `,"actions_caches":[{"key":"prefix-one"},{"key":"prefix-two"}]}`))
+	}))
+	defer server.Close()
+	baseURL, err := url.Parse(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(keys, ",") != "prefix-one" || !truncated {
-		t.Fatalf("bounded keys/truncated = %v/%t", keys, truncated)
-	}
-	keys, truncated, err = catalog.List(context.Background(), "prefix-", UnboundedListing)
+	catalog := &ActionsCatalog{baseURL: baseURL, repository: "owner/repository", token: "token", client: server.Client()}
+	keys, skipped, err := catalog.List(context.Background(), "prefix-", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(keys, ",") != "prefix-one,prefix-two" || truncated {
-		t.Fatalf("unbounded keys/truncated = %v/%t", keys, truncated)
+	if strings.Join(keys, ",") != "prefix-one" || skipped != 4 {
+		t.Fatalf("bounded keys/skipped = %v/%d", keys, skipped)
+	}
+	keys, skipped, err = catalog.List(context.Background(), "prefix-", UnboundedListing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(keys, ",") != "prefix-one,prefix-two" || skipped != 0 {
+		t.Fatalf("unbounded keys/skipped = %v/%d", keys, skipped)
+	}
+
+	// Without a usable total_count only the entry that tripped the limit is
+	// known to be unlisted, and the count must never collapse to zero.
+	totalCount = "0"
+	if _, skipped, err = catalog.List(context.Background(), "prefix-", 1); err != nil {
+		t.Fatal(err)
+	} else if skipped != 1 {
+		t.Fatalf("skipped without total_count = %d", skipped)
 	}
 }
 

@@ -669,16 +669,16 @@ func (p *packStore) discover(ctx context.Context) error {
 	// entry's lifetime. Manifests are listed first, so the pack listing below
 	// cannot miss a pack that a concurrent writer published before its
 	// manifest.
-	manifestKeys, truncated, err := p.catalog.List(ctx, manifestKeyFor(p.keyPrefix, ""), p.maxManifests)
+	manifestKeys, skipped, err := p.catalog.List(ctx, manifestKeyFor(p.keyPrefix, ""), p.maxManifests)
 	if err != nil {
 		return err
 	}
 	p.server.stats.manifestsDiscovered.Add(uint64(len(manifestKeys)))
-	if truncated {
-		p.server.stats.manifestDiscoveryTruncated.Store(true)
+	if skipped > 0 {
+		p.server.stats.manifestsSkipped.Add(uint64(skipped))
 		p.server.cfg.Logger.Printf(
-			"manifest discovery stopped at the max-manifests limit of %d; older manifests are treated as cache misses",
-			p.maxManifests)
+			"manifest discovery stopped at the max-manifests limit of %d; %d older manifests are treated as cache misses",
+			p.maxManifests, skipped)
 	}
 	// Packs are only witnessed, never read, during discovery. A truncated pack
 	// listing would look like eviction and suppress valid downloads, so it is
