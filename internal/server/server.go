@@ -218,48 +218,43 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleImplicitEmptyCASRead(w, r)
 		return
 	}
-	key := s.cfg.KeyPrefix + "-" + kind + "-" + digest
 	switch r.Method {
 	case http.MethodHead:
-		s.handleHead(w, r, key, kind, digest)
+		s.handleHead(w, r, kind, digest)
 	case http.MethodGet:
-		s.handleRead(w, r, key, kind, digest)
+		s.handleRead(w, r, kind, digest)
 	case http.MethodPut:
-		s.handlePut(w, r, key, kind, digest)
+		s.handlePut(w, r, kind, digest)
 	default:
 		w.Header().Set("Allow", "GET, HEAD, PUT")
 		s.reject(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-// handleHead answers a packed CAS presence check from the manifest view.
-// Bazel issues these while building without the bytes, so restoring a whole
-// pack to answer one would defeat the point.
-func (s *Server) handleHead(w http.ResponseWriter, r *http.Request, key, kind, digest string) {
+// handleHead answers a packed CAS presence check from the manifest view. Bazel
+// issues these while building without the bytes, so restoring a whole pack to
+// answer one would defeat the point.
+func (s *Server) handleHead(w http.ResponseWriter, r *http.Request, kind, digest string) {
 	if s.packs == nil || kind != "cas" {
-		s.handleRead(w, r, key, kind, digest)
+		s.handleRead(w, r, kind, digest)
 		return
 	}
-	size, found, err := s.presence(r.Context(), key)
-	if err != nil || !found {
-		if err != nil {
-			s.cfg.Logger.Printf("presence check for cas/%s failed: %s", digest, safeError(err))
-		}
-		s.stats.misses.Add(1)
+	size, err := s.casPresence(r.Context(), digest)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	s.stats.hits.Add(1)
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
-	w.WriteHeader(http.StatusOK)
+	s.writeObjectHeader(w, size)
 }
 
 func (s *Server) handleImplicitEmptyCASRead(w http.ResponseWriter, r *http.Request) {
 	s.stats.hits.Add(1)
+	s.writeObjectHeader(w, 0)
+}
+
+func (s *Server) writeObjectHeader(w http.ResponseWriter, size int64) {
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", "0")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.WriteHeader(http.StatusOK)
 }
@@ -297,71 +292,15 @@ func parseObjectPath(path string) (kind, digest string, ok bool) {
 	return parts[0], parts[1], true
 }
 
-func (s *Server) handleRead(w http.ResponseWriter, r *http.Request, key, kind, digest string) {
-	obj, found, err := s.resolve(r.Context(), key, kind, digest)
+func (s *Server) handleRead(w http.ResponseWriter, r *http.Request, kind, digest string) {
+	file, size, err := s.openObject(r.Context(), kind, digest)
 	if err != nil {
-		s.stats.backendLoadErrors.Add(1)
-		s.cfg.Logger.Printf("backend load failed for %s/%s: %s", kind, digest, safeError(err))
-		if s.cfg.FailOpen {
-			s.stats.misses.Add(1)
-			http.NotFound(w, r)
-		} else {
-			http.Error(w, "cache backend unavailable", http.StatusBadGateway)
-		}
-		return
-	}
-	if !found {
-		s.stats.misses.Add(1)
-		http.NotFound(w, r)
-		return
-	}
-	if kind == "ac" {
-		if err := s.validateActionResult(r.Context(), obj); err != nil {
-			switch {
-			case errors.Is(err, errIncompleteActionResult):
-				s.stats.incompleteActionResults.Add(1)
-				s.stats.misses.Add(1)
-				s.cfg.Logger.Printf("action result ac/%s is incomplete: %s", digest, safeError(err))
-				http.NotFound(w, r)
-			case errors.Is(err, errInvalidActionResult):
-				s.stats.invalidActionResults.Add(1)
-				s.stats.misses.Add(1)
-				s.cfg.Logger.Printf("action result ac/%s is invalid: %s", digest, safeError(err))
-				http.NotFound(w, r)
-			default:
-				s.stats.backendLoadErrors.Add(1)
-				s.cfg.Logger.Printf("action result ac/%s validation failed: %s", digest, safeError(err))
-				if s.cfg.FailOpen {
-					s.stats.misses.Add(1)
-					http.NotFound(w, r)
-				} else {
-					http.Error(w, "cache backend unavailable", http.StatusBadGateway)
-				}
-			}
-			return
-		}
-		s.stats.validatedActionResults.Add(1)
-	}
-
-	file, err := os.Open(obj.path)
-	if err != nil {
-		s.stats.backendLoadErrors.Add(1)
-		s.cfg.Logger.Printf("open local cache object %s/%s: %v", kind, digest, err)
-		if s.cfg.FailOpen {
-			s.stats.misses.Add(1)
-			http.NotFound(w, r)
-		} else {
-			http.Error(w, "local cache unavailable", http.StatusInternalServerError)
-		}
+		s.failRequest(w, r, err)
 		return
 	}
 	defer file.Close()
 
-	s.stats.hits.Add(1)
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(obj.size, 10))
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
-	w.WriteHeader(http.StatusOK)
+	s.writeObjectHeader(w, size)
 	if r.Method == http.MethodHead {
 		return
 	}
@@ -369,6 +308,17 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request, key, kind, d
 	s.stats.bytesServed.Add(uint64(n))
 	if err != nil {
 		s.cfg.Logger.Printf("serve cache object %s/%s: %v", kind, digest, err)
+	}
+}
+
+func (s *Server) failRequest(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, errCacheMiss):
+		http.NotFound(w, r)
+	case errors.Is(err, errLocalFailure):
+		http.Error(w, "local cache unavailable", http.StatusInternalServerError)
+	default:
+		http.Error(w, "cache backend unavailable", http.StatusBadGateway)
 	}
 }
 
@@ -482,7 +432,7 @@ func (s *Server) backendExists(ctx context.Context, key string) (bool, error) {
 	return s.cfg.Backend.Exists(backendCtx, key)
 }
 
-func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key, kind, digest string) {
+func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, kind, digest string) {
 	if encoding := r.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
 		s.reject(w, "content encoding is unsupported", http.StatusUnsupportedMediaType)
 		return
@@ -496,141 +446,17 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key, kind, di
 		return
 	}
 
-	file, err := os.CreateTemp(s.cfg.CacheDir, "upload-*")
-	if err != nil {
-		http.Error(w, "cannot create upload spool", http.StatusInternalServerError)
-		return
-	}
-	path := file.Name()
-	keep := false
-	defer func() {
-		_ = file.Close()
-		if !keep {
-			_ = os.Remove(path)
-		}
-	}()
-
-	hasher := sha256.New()
-	writer := io.Writer(file)
-	if kind == "cas" {
-		writer = io.MultiWriter(file, hasher)
-	}
-	n, err := io.Copy(writer, io.LimitReader(r.Body, r.ContentLength+1))
-	s.stats.bytesReceived.Add(uint64(n))
-	if err != nil {
-		s.reject(w, "failed to read request body", http.StatusBadRequest)
-		return
-	}
-	if n != r.ContentLength {
+	switch err := s.writeObject(r.Context(), kind, digest, r.Body, r.ContentLength); {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, errPayloadTruncated):
 		s.reject(w, "body size does not match Content-Length", http.StatusBadRequest)
-		return
-	}
-	if kind == "cas" {
-		actual := hex.EncodeToString(hasher.Sum(nil))
-		if actual != digest {
-			s.reject(w, "CAS digest does not match request body", http.StatusUnprocessableEntity)
-			return
-		}
-	}
-	if err := file.Sync(); err != nil {
-		http.Error(w, "cannot sync upload spool", http.StatusInternalServerError)
-		return
-	}
-
-	s.objectsMu.Lock()
-	stored, exists := s.objects[key]
-	if !exists {
-		stored = object{path: path, size: n}
-		s.objects[key] = stored
-		keep = true
-	}
-	s.objectsMu.Unlock()
-
-	if !s.cfg.WriteEnabled {
-		s.stats.discardedUploads.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if s.packs != nil {
-		if kind == "cas" {
-			s.packs.stageCAS(digest, stored)
-		} else {
-			closure, err := s.collectActionResultClosure(r.Context(), stored)
-			if err != nil {
-				s.handlePackedActionValidationError(w, digest, err)
-				return
-			}
-			if err := s.packs.stageAction(digest, stored, closure); err != nil {
-				s.handleSaveError(w, kind, digest, err)
-				return
-			}
-			s.stats.validatedActionResults.Add(1)
-		}
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if kind == "ac" {
-		if err := s.validateActionResultForPublication(r.Context(), object{path: path, size: n}); err != nil {
-			switch {
-			case errors.Is(err, errIncompleteActionResult):
-				s.stats.incompleteActionResults.Add(1)
-				s.stats.skippedActionResultUploads.Add(1)
-				s.cfg.Logger.Printf("not publishing incomplete action result ac/%s: %s", digest, safeError(err))
-				w.WriteHeader(http.StatusNoContent)
-			case errors.Is(err, errInvalidActionResult):
-				s.stats.invalidActionResults.Add(1)
-				s.stats.skippedActionResultUploads.Add(1)
-				s.cfg.Logger.Printf("not publishing invalid action result ac/%s: %s", digest, safeError(err))
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				s.stats.backendLoadErrors.Add(1)
-				s.cfg.Logger.Printf("action result ac/%s publication validation failed: %s", digest, safeError(err))
-				if s.cfg.FailOpen {
-					s.stats.skippedActionResultUploads.Add(1)
-					w.WriteHeader(http.StatusNoContent)
-				} else {
-					http.Error(w, "cache backend unavailable", http.StatusBadGateway)
-				}
-			}
-			return
-		}
-		s.stats.validatedActionResults.Add(1)
-	}
-
-	deduplicated, err := s.publishOnce(r.Context(), key, file, n)
-	if err != nil {
-		s.handleSaveError(w, kind, digest, err)
-		return
-	}
-	if deduplicated {
-		s.stats.deduplicatedUploads.Add(1)
-	} else {
-		s.stats.uploads.Add(1)
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handlePackedActionValidationError(w http.ResponseWriter, digest string, err error) {
-	switch {
-	case errors.Is(err, errIncompleteActionResult):
-		s.stats.incompleteActionResults.Add(1)
-		s.stats.skippedActionResultUploads.Add(1)
-		s.cfg.Logger.Printf("not staging incomplete action result ac/%s: %s", digest, safeError(err))
-		w.WriteHeader(http.StatusNoContent)
-	case errors.Is(err, errInvalidActionResult):
-		s.stats.invalidActionResults.Add(1)
-		s.stats.skippedActionResultUploads.Add(1)
-		s.cfg.Logger.Printf("not staging invalid action result ac/%s: %s", digest, safeError(err))
-		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, errPayloadMismatch):
+		s.reject(w, "CAS digest does not match request body", http.StatusUnprocessableEntity)
+	case errors.Is(err, errLocalFailure):
+		http.Error(w, "cannot spool upload", http.StatusInternalServerError)
 	default:
-		s.stats.backendLoadErrors.Add(1)
-		s.cfg.Logger.Printf("packed action result ac/%s validation failed: %s", digest, safeError(err))
-		if s.cfg.FailOpen {
-			s.stats.skippedActionResultUploads.Add(1)
-			w.WriteHeader(http.StatusNoContent)
-		} else {
-			http.Error(w, "cache backend unavailable", http.StatusBadGateway)
-		}
+		http.Error(w, "cache backend unavailable", http.StatusBadGateway)
 	}
 }
 
@@ -696,16 +522,6 @@ func (s *Server) publish(ctx context.Context, key string, file *os.File, size in
 	backendCtx, cancel := context.WithTimeout(ctx, s.cfg.BackendTimeout)
 	defer cancel()
 	return s.cfg.Backend.Save(backendCtx, key, file, size)
-}
-
-func (s *Server) handleSaveError(w http.ResponseWriter, kind, digest string, err error) {
-	s.stats.backendSaveErrors.Add(1)
-	s.cfg.Logger.Printf("backend save failed for %s/%s: %s", kind, digest, safeError(err))
-	if s.cfg.FailOpen {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	http.Error(w, "cache backend unavailable", http.StatusBadGateway)
 }
 
 func (s *Server) reject(w http.ResponseWriter, message string, status int) {
