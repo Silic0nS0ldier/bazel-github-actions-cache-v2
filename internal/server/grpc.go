@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	remoteasset "github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/asset/v1"
 	remoteexecution "github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/execution/v2"
 	"github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/semver"
 	"github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/google/bytestream"
@@ -34,6 +35,7 @@ func (s *Server) GRPCHandler() *grpc.Server {
 	remoteexecution.RegisterCapabilitiesServer(handler, &capabilitiesService{server: s})
 	remoteexecution.RegisterActionCacheServer(handler, &actionCacheService{server: s})
 	remoteexecution.RegisterContentAddressableStorageServer(handler, &casService{server: s})
+	remoteasset.RegisterFetchServer(handler, &assetService{server: s})
 	bytestream.RegisterByteStreamServer(handler, &byteStreamService{server: s})
 	return handler
 }

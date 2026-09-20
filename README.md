@@ -243,6 +243,36 @@ Supported over gRPC:
 - `ActionCache.GetActionResult` and `UpdateActionResult`
 - `Capabilities.GetCapabilities`
 - `ByteStream.Read` and `Write` for blobs above the 4 MiB batch limit
+- `asset.v1.Fetch.FetchBlob`, backing `--remote_downloader`
+
+## Caching repository downloads
+
+Action and CAS caching never covers the archives that repository rules fetch,
+because those are extracted outside the action graph. `--remote_downloader`
+closes that gap:
+
+```bash
+bazel test //... \
+  --remote_cache="$CACHE_URL" \
+  --remote_downloader="$CACHE_URL" \
+  --remote_downloader_local_fallback
+```
+
+The fallback flag matters: it defaults to `false`, and Bazel treats any non-OK
+fetch as an error rather than a miss, so without it the first build that cannot
+be served fails outright.
+
+A repository rule must declare a checksum for its download to be cached. Bazel
+sends that checksum as a `checksum.sri` qualifier, which is what lets a hit be
+served straight from the CAS. When a rule declares no checksum Bazel explicitly
+forbids cached content, and this server answers `NOT_FOUND`.
+
+Bazel's downloader never pushes a fetched archive back, so a cache-only
+implementation could never be populated. On a miss this server fetches the asset
+itself, over `https` only, verifies it against the requested checksum before
+storing anything, and publishes it so that later jobs get a hit. Credentials are
+never forwarded: `http_header` qualifiers are ignored, so private origins are not
+supported. `asset_downloads` and `asset_fetch_errors` report that activity.
 
 Supported by both:
 
@@ -262,6 +292,7 @@ Not currently supported:
 - Bazel `instance_name` prefixes; a non-empty one is rejected rather than ignored
 - HTTP or zstd remote-cache compression, including `compressed-blobs` resources
 - resumable `ByteStream` uploads; `QueryWriteStatus` always reports no progress
+- `asset.v1.Push`, `FetchDirectory`, and authenticated asset origins
 - remote execution
 - range requests
 - Windows or macOS runners
@@ -336,6 +367,12 @@ environment, exhaust the job's local disk, or submit valid AC objects. Do not
 run untrusted code in a cache-writing job. Fork pull requests are forced
 read-only, but GitHub's general guidance about untrusted workflows and
 self-hosted runners still applies.
+
+Serving `--remote_downloader` means the server makes outbound requests to URIs a
+caller supplies. Those are restricted to `https`, may not be redirected off it,
+are bounded by `max-blob-size-mb`, and are discarded unless they match the
+checksum the caller asked for. No credential is ever attached, so this grants a
+caller nothing it could not already do by fetching the URI itself.
 
 Action-cache values cannot be content-verified against the action digest (the
 digest addresses the action, not the serialized result). Cache poisoning is

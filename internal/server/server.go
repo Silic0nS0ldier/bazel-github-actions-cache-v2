@@ -60,6 +60,9 @@ type Config struct {
 	ShutdownToken        string
 	Shutdown             func()
 	Logger               *log.Logger
+	// AssetClient fetches remote assets from their origin. A nil client gets a
+	// default that refuses to be redirected off HTTPS.
+	AssetClient *http.Client
 }
 
 type object struct {
@@ -138,6 +141,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(io.Discard, "", 0)
+	}
+	if cfg.AssetClient == nil {
+		cfg.AssetClient = defaultAssetClient()
 	}
 	if err := os.MkdirAll(cfg.CacheDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create cache directory: %w", err)
