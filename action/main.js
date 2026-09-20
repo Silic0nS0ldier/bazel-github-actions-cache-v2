@@ -34,6 +34,14 @@ function positiveInteger(name, fallback, maximum = Number.MAX_SAFE_INTEGER) {
   return value;
 }
 
+function portNumber(name) {
+  const value = Number.parseInt(input(name, "0"), 10);
+  if (!Number.isSafeInteger(value) || value < 0 || value > 65535) {
+    throw new Error(`${name} must be an integer between 0 and 65535`);
+  }
+  return value;
+}
+
 async function main() {
   if (process.platform !== "linux") {
     throw new Error("this release supports Linux GitHub Actions runners only");
@@ -76,10 +84,10 @@ async function main() {
     throw new Error("storage-mode=packs requires github-token with actions: read");
   }
   if (githubToken) mask(githubToken);
-  const portText = input("port", "0");
-  const port = Number.parseInt(portText, 10);
-  if (!Number.isSafeInteger(port) || port < 0 || port > 65535) {
-    throw new Error("port must be an integer between 0 and 65535");
+  const port = portNumber("port");
+  const grpcPort = portNumber("grpc-port");
+  if (port !== 0 && port === grpcPort) {
+    throw new Error("port and grpc-port must differ");
   }
 
   const tempDir = safeTemporaryDirectory(
@@ -95,6 +103,8 @@ async function main() {
   const args = [
     "--port",
     String(port),
+    "--grpc-port",
+    String(grpcPort),
     "--cache-dir",
     spoolDir,
     "--key-prefix",
@@ -167,15 +177,20 @@ async function main() {
   saveState("temp_dir", tempDir);
   saveState("shutdown_wait_seconds", String(Math.max(60, backendTimeoutSeconds + 30)));
   setOutput("url", ready.url);
+  setOutput("grpc-url", ready.grpc_url);
   setOutput("stats-url", ready.stats_url);
   setOutput("writable", String(writeEnabled));
   setOutput(
     "bazel-args",
     `--remote_cache=${ready.url} --remote_upload_local_results=${writeEnabled}`,
   );
+  setOutput(
+    "grpc-bazel-args",
+    `--remote_cache=${ready.grpc_url} --remote_upload_local_results=${writeEnabled}`,
+  );
   setOutput("initial-stats", '{"requests":0,"hits":0,"misses":0,"uploads":0}');
   process.stdout.write(
-    `Bazel cache adapter ready at ${ready.url} (write=${writeEnabled}, mode=${storageMode}, fail_open=${failOpen}, pid=${ready.pid})${os.EOL}`,
+    `Bazel cache adapter ready at ${ready.url} and ${ready.grpc_url} (write=${writeEnabled}, mode=${storageMode}, fail_open=${failOpen}, pid=${ready.pid})${os.EOL}`,
   );
 }
 

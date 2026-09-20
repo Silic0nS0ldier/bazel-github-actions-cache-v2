@@ -35,13 +35,16 @@ steps:
 
   - name: Test
     env:
-      CACHE_URL: ${{ steps.bazel-cache.outputs.url }}
+      CACHE_URL: ${{ steps.bazel-cache.outputs.grpc-url }}
       CACHE_WRITABLE: ${{ steps.bazel-cache.outputs.writable }}
     run: >
       bazel test //...
       --remote_cache="$CACHE_URL"
       --remote_upload_local_results="$CACHE_WRITABLE"
 ```
+
+Swap `grpc-url` for `url` to use the HTTP endpoint instead; both serve the same
+cache and either can be used without changing anything else.
 
 `write: auto` is deliberately conservative: only a `push` to the repository's
 default branch publishes entries. Pull requests are read-only by default, and
@@ -212,19 +215,37 @@ Do not enable Bazel remote-cache compression with this release.
 | `max-uploads-per-minute` | `180` | Evenly spaced uploads; must be below 200 |
 | `backend-timeout-seconds` | `300` | Timeout for one GitHub cache operation and initial packed-manifest discovery |
 | `port` | `0` | Loopback port; zero chooses a free dynamic port |
+| `grpc-port` | `0` | Loopback port for the gRPC API; zero chooses a free dynamic port |
 
-The main step outputs `url`, `stats-url`, `writable`, `bazel-args`, and
-`initial-stats`. The post step emits `final-stats` and always writes the final
-counts to the job summary. Because post steps run after normal job steps,
-consume `stats-url` during the job if a later step must assert statistics.
+The main step outputs `url`, `grpc-url`, `stats-url`, `writable`, `bazel-args`,
+`grpc-bazel-args`, and `initial-stats`. The post step emits `final-stats` and
+always writes the final counts to the job summary. Because post steps run after
+normal job steps, consume `stats-url` during the job if a later step must assert
+statistics.
 
 ## Protocol support
 
-Supported:
+The adapter serves two endpoints from one process against one cache: HTTP on
+`url` and gRPC on `grpc-url`. Point Bazel at either with `--remote_cache`. The
+gRPC endpoint is the faster of the two because `FindMissingBlobs` settles a
+whole input closure in one call, where HTTP needs a `HEAD` per blob.
+
+Supported over HTTP:
 
 - `GET`, `HEAD`, and `PUT` on exactly `/cas/<lowercase-sha256>`
 - `GET`, `HEAD`, and `PUT` on exactly `/ac/<lowercase-sha256>`
 - mandatory `Content-Length` and identity encoding
+
+Supported over gRPC:
+
+- `ContentAddressableStorage.FindMissingBlobs`, `BatchUpdateBlobs`,
+  `BatchReadBlobs`, and `GetTree`
+- `ActionCache.GetActionResult` and `UpdateActionResult`
+- `Capabilities.GetCapabilities`
+- `ByteStream.Read` and `Write` for blobs above the 4 MiB batch limit
+
+Supported by both:
+
 - CAS SHA-256 verification before publication and after download
 - structural validation of REAPI `ActionResult`, `Tree`, and `Directory`
   messages
@@ -232,15 +253,16 @@ Supported:
 - AC publication only after every referenced CAS object is persistent
 - implicit handling of the standard SHA-256 zero-byte CAS digest
 - immutable cache keys
-- per-job coalescing of duplicate immutable `PUT`s before rate limiting and backend publication
+- per-job coalescing of duplicate immutable uploads before rate limiting and backend publication
 - opt-in CARv2 archives with footer indexes, DAG-CBOR manifests, concurrent
   writer head merging, and action-result conflict detection
 
 Not currently supported:
 
-- Bazel `instance_name` path prefixes
-- HTTP or zstd remote-cache compression
-- gRPC or remote execution
+- Bazel `instance_name` prefixes; a non-empty one is rejected rather than ignored
+- HTTP or zstd remote-cache compression, including `compressed-blobs` resources
+- resumable `ByteStream` uploads; `QueryWriteStatus` always reports no progress
+- remote execution
 - range requests
 - Windows or macOS runners
 
@@ -253,6 +275,17 @@ uploads. In `packs` mode a successful flush consumes one creation for the CARv2
 pack and one for its manifest, so a large build graph is governed by pack count
 instead of object count. `pack_uploads`, `manifest_uploads`, and
 `pack_downloads` make that distinction explicit in the final statistics.
+
+Three counters describe load, and they deliberately do not agree:
+
+| Counter | Counts | Reading it |
+| --- | --- | --- |
+| `requests` | One per client call: an HTTP request, or a gRPC RPC | Over gRPC this should be far below `operations`; if it is not, the client is not batching |
+| `operations` | One per cache object the client asked about | Comparable between HTTP and gRPC, so it measures the build rather than the protocol |
+| `backend_requests` | One per call into the GitHub Actions cache | Tracks API pressure and quota risk; closure validation and packed reads raise it without any matching client call |
+
+Manifest discovery talks to the GitHub REST API instead, under a separate quota,
+and is reported by `manifests_discovered` and `packs_discovered`.
 
 GitHub's repository cache quota, eviction policy, and branch restrictions all
 apply. At the time of writing, the default repository quota is 10 GB and caches

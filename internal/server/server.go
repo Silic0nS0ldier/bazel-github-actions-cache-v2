@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cre4ture/bazel-github-actions-cache-v2/internal/cache"
@@ -149,6 +150,10 @@ func New(cfg Config) (*Server, error) {
 		sem:        make(chan struct{}, cfg.MaxConcurrent),
 		limiter:    newIntervalLimiter(cfg.UploadsPerMinute),
 	}
+	server.cfg.Backend = &countingBackend{
+		backend: cfg.Backend,
+		counter: &server.stats.backendRequests,
+	}
 	if cfg.StorageMode == "packs" {
 		packs, err := newPackStore(server)
 		if err != nil {
@@ -157,6 +162,30 @@ func New(cfg Config) (*Server, error) {
 		server.packs = packs
 	}
 	return server, nil
+}
+
+// countingBackend records every call into the GitHub Actions cache. Counting at
+// this boundary rather than at each call site keeps the total honest: closure
+// validation, packed reads, and retries all reach the API without a matching
+// client request.
+type countingBackend struct {
+	backend cache.Backend
+	counter *atomic.Uint64
+}
+
+func (b *countingBackend) Exists(ctx context.Context, key string) (bool, error) {
+	b.counter.Add(1)
+	return b.backend.Exists(ctx, key)
+}
+
+func (b *countingBackend) Load(ctx context.Context, key string, dst io.Writer) (bool, error) {
+	b.counter.Add(1)
+	return b.backend.Load(ctx, key, dst)
+}
+
+func (b *countingBackend) Save(ctx context.Context, key string, src *os.File, size int64) error {
+	b.counter.Add(1)
+	return b.backend.Save(ctx, key, src, size)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -248,7 +277,7 @@ func (s *Server) handleHead(w http.ResponseWriter, r *http.Request, kind, digest
 }
 
 func (s *Server) handleImplicitEmptyCASRead(w http.ResponseWriter, r *http.Request) {
-	s.stats.hits.Add(1)
+	s.implicitEmptyCASHit()
 	s.writeObjectHeader(w, 0)
 }
 
