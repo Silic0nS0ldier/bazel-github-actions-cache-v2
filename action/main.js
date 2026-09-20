@@ -16,6 +16,7 @@ const {
   saveState,
   setOutput,
 } = require("./lib");
+const { resolveServerBinary } = require("./release");
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -57,11 +58,6 @@ async function main() {
   if (!architecture) {
     throw new Error(`unsupported Linux architecture: ${process.arch}`);
   }
-  const actionRoot = path.resolve(__dirname, "..");
-  const binary = path.join(actionRoot, "dist", `cache-server-linux-${architecture}`);
-  if (!fs.existsSync(binary)) {
-    throw new Error(`packaged server binary is missing: ${binary}`);
-  }
 
   const writeEnabled = resolveWriteMode(input("write", "auto"));
   const failOpen = !parseBoolean(input("fail-on-cache-error", "false"), "fail-on-cache-error");
@@ -99,6 +95,19 @@ async function main() {
   const spoolDir = path.join(tempDir, "spool");
   const shutdownToken = crypto.randomBytes(32).toString("hex");
   mask(shutdownToken);
+
+  const binary = await resolveServerBinary({
+    actionRoot: path.resolve(__dirname, ".."),
+    architecture,
+    // Installing under a fixed name keeps every part of the spawned path a
+    // constant, so no release name can influence which program runs.
+    installPath: path.join(tempDir, "cache-server"),
+    repository: process.env.GITHUB_ACTION_REPOSITORY,
+    ref: process.env.GITHUB_ACTION_REF,
+    token: githubToken || process.env.GITHUB_TOKEN || "",
+    toolCacheRoot: path.resolve(process.env.RUNNER_TOOL_CACHE || process.env.RUNNER_TEMP || os.tmpdir()),
+    log: (message) => process.stdout.write(`${message}${os.EOL}`),
+  });
 
   const args = [
     "--port",

@@ -1,0 +1,77 @@
+name: Publish release
+description: >-
+  Builds the server binaries, attests their provenance, and publishes them as
+  assets on a tag pointing at the commit they were built from.
+
+inputs:
+  version:
+    description: Release tag to create
+    required: true
+  prerelease:
+    description: Mark the release as a pre-release
+    required: false
+    default: "false"
+  notes:
+    description: Release notes body
+    required: true
+  token:
+    description: Token used to create the tag and publish the release
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build server binaries
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: scripts/build-dist.sh
+
+    # The action verifies this attestation before it will run a downloaded
+    # binary, which is what lets the repository ship no build output at all.
+    - name: Attest the build provenance
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-path: |
+          dist/cache-server-linux-amd64
+          dist/cache-server-linux-arm64
+
+    # The tag points at the reviewed commit itself, so the tree a consumer
+    # checks out is exactly the tree CI ran against.
+    - name: Tag the release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        VERSION: ${{ inputs.version }}
+        REPOSITORY: ${{ github.repository }}
+        BASE_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        gh api --method POST "repos/$REPOSITORY/git/refs" \
+          --field ref="refs/tags/$VERSION" --field sha="$BASE_SHA" >/dev/null
+
+    # Immutable releases lock assets at publication, so the release is drafted,
+    # populated, and only then published.
+    - name: Publish the release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        VERSION: ${{ inputs.version }}
+        NOTES: ${{ inputs.notes }}
+        PRERELEASE: ${{ inputs.prerelease }}
+      run: |
+        set -euo pipefail
+        create=(gh release create "$VERSION" --draft --verify-tag --title "$VERSION" --notes "$NOTES")
+        if [[ "$PRERELEASE" == "true" ]]; then
+          create+=(--prerelease)
+        fi
+        "${create[@]}"
+        gh release upload "$VERSION" \
+          dist/cache-server-linux-amd64 \
+          dist/cache-server-linux-arm64 \
+          dist/SHA256SUMS
+        publish=(gh release edit "$VERSION" --draft=false)
+        if [[ "$PRERELEASE" != "true" ]]; then
+          publish+=(--latest)
+        fi
+        "${publish[@]}"
