@@ -16,6 +16,7 @@ plugins:
       - default_api_level=API_OPAQUE
       - Mbuild/bazel/semver/semver.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/semver;semver
       - Mbuild/bazel/remote/execution/v2/remote_execution.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/execution/v2;remoteexecution
+      - Mbuild/bazel/remote/asset/v1/remote_asset.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/asset/v1;remoteasset
       - Mgoogle/bytestream/bytestream.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/google/bytestream;bytestream
   - local: protoc-gen-go-grpc
     out: internal/proto/gen
@@ -23,4 +24,5 @@ plugins:
       - paths=source_relative
       - Mbuild/bazel/semver/semver.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/semver;semver
       - Mbuild/bazel/remote/execution/v2/remote_execution.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/execution/v2;remoteexecution
+      - Mbuild/bazel/remote/asset/v1/remote_asset.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/asset/v1;remoteasset
       - Mgoogle/bytestream/bytestream.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/google/bytestream;bytestream

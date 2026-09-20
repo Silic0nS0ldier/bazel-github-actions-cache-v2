@@ -18,6 +18,7 @@ protoc_gen_go_grpc_version=v1.5.1
 # bazelbuild/remote-apis tag v2.12.0.
 remote_apis_revision=9e084d0e43e717128ee72b5be584a7ba33e8006b
 remote_apis_files=(
+  build/bazel/remote/asset/v1/remote_asset.proto
   build/bazel/remote/execution/v2/remote_execution.proto
   build/bazel/semver/semver.proto
 )
