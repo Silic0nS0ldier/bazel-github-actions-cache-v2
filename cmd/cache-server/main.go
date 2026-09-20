@@ -44,6 +44,8 @@ func run() error {
 		packSize         = flag.Int64("pack-size", 8*1024*1024, "target CARv2 pack size in bytes")
 		packFlush        = flag.Duration("pack-flush-interval", 30*time.Second, "maximum delay before flushing pending CARv2 data")
 		packRenew        = flag.Duration("pack-renew-interval", 15*time.Second, "delay before renewing retention for packs that only presence checks touched")
+		packCompression  = flag.Bool("pack-compression", true, "compress individual pack blocks that shrink meaningfully")
+		packLevel        = flag.Int64("pack-compression-level", 3, "zstd level used for pack blocks (1-19)")
 		maxManifests     = flag.Int("max-manifests", 2048, "maximum manifests to read during discovery; any beyond this are ignored")
 		writeEnabled     = flag.Bool("write-enabled", false, "publish validated uploads")
 		failOpen         = flag.Bool("fail-open", true, "degrade backend errors to misses/success")
@@ -98,24 +100,26 @@ func run() error {
 		}
 	}
 	srv, err := cacheserver.New(cacheserver.Config{
-		Backend:           backend,
-		Catalog:           catalog,
-		CacheDir:          dir,
-		KeyPrefix:         *keyPrefix,
-		StorageMode:       *storageMode,
-		PackSize:          *packSize,
-		PackFlushInterval: *packFlush,
-		PackRenewInterval: *packRenew,
-		MaxManifests:      *maxManifests,
-		WriteEnabled:      *writeEnabled,
-		FailOpen:          *failOpen,
-		MaxBlobSize:       *maxBlobSize,
-		MaxConcurrent:     *maxConcurrent,
-		UploadsPerMinute:  *uploadsPerMinute,
-		BackendTimeout:    *backendTimeout,
-		ShutdownToken:     os.Getenv("BAZEL_GHA_CACHE_SHUTDOWN_TOKEN"),
-		Shutdown:          requestShutdown,
-		Logger:            logger,
+		Backend:              backend,
+		Catalog:              catalog,
+		CacheDir:             dir,
+		KeyPrefix:            *keyPrefix,
+		StorageMode:          *storageMode,
+		PackSize:             *packSize,
+		PackFlushInterval:    *packFlush,
+		PackRenewInterval:    *packRenew,
+		PackCompression:      *packCompression,
+		PackCompressionLevel: *packLevel,
+		MaxManifests:         *maxManifests,
+		WriteEnabled:         *writeEnabled,
+		FailOpen:             *failOpen,
+		MaxBlobSize:          *maxBlobSize,
+		MaxConcurrent:        *maxConcurrent,
+		UploadsPerMinute:     *uploadsPerMinute,
+		BackendTimeout:       *backendTimeout,
+		ShutdownToken:        os.Getenv("BAZEL_GHA_CACHE_SHUTDOWN_TOKEN"),
+		Shutdown:             requestShutdown,
+		Logger:               logger,
 	})
 	if err != nil {
 		return err

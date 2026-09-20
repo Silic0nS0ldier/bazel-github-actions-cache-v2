@@ -141,6 +141,33 @@ uploads the CARv2 file first and the manifest second; the manifest is the
 commit point. Thus cancellation, eviction, a corrupt pack, or a missing output
 closure can only lose a cache hit and cannot supply incomplete build output.
 
+### Pack compression
+
+Nothing between this server and GitHub compresses anything: the cache-v2 client
+uploads bytes verbatim and registers the raw length, which is what the 10 GB
+repository quota is charged. Pack blocks are therefore compressed here, with
+zstd, before upload.
+
+Compression is per block rather than per pack, so the CARv2 index stays useful:
+restoring a pack and serving one object decompresses that object alone instead
+of expanding the whole archive. It also lets one pack mix compressed and
+verbatim blocks, which matters when a build produces both text and
+already-compressed artifacts such as OCI layers.
+
+A block is stored verbatim when compression cannot pay for itself: below 256
+bytes, or when the result is not at least 5% smaller. Objects larger than 1 MiB
+are sampled first, so an incompressible one is rejected after a few hundred KB
+rather than after compressing the whole thing. `compressed_blocks` and
+`compression_saved_bytes` report the outcome.
+
+A compressed block is addressed in the pack by the digest of its compressed
+bytes, and the manifest records that block CID alongside the object's own CID.
+A reader verifies the stored block against the block CID, decompresses it under
+a size bound taken from the manifest, and then verifies the result against the
+object CID, so a corrupt or truncated block is a cache miss rather than bad
+build input. Disabling `pack-compression` stops writing compressed blocks but
+never stops reading them.
+
 ### IronMesh example
 
 The action can replace the external-cache URL and token in the Bazel job:
@@ -176,6 +203,8 @@ Do not enable Bazel remote-cache compression with this release.
 | `pack-size-mb` | `8` | Target size for a CARv2 archive; only for `packs`, 1–32 MiB |
 | `pack-flush-seconds` | `30` | Maximum local staging interval; only for `packs` |
 | `pack-renew-seconds` | `15` | Batching delay for pack retention renewals; only for `packs` |
+| `pack-compression` | `true` | Compress pack blocks with zstd; only for `packs` |
+| `pack-compression-level` | `3` | zstd level for pack blocks, 1–19; only for `packs` |
 | `max-manifests` | `2048` | Maximum manifests downloaded during discovery; only for `packs` |
 | `github-token` | `${{ github.token }}` | `actions: read` token for packed-manifest discovery |
 | `max-blob-size-mb` | `512` | Maximum spooled upload/download size |

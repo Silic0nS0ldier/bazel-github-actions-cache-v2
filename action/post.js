@@ -75,6 +75,8 @@ async function post() {
       `| Manifest uploads | ${stats.manifest_uploads ?? 0} |`,
       `| CARv2 pack downloads | ${stats.pack_downloads ?? 0} |`,
       `| Pack retention renewals | ${stats.pack_renewals ?? 0} |`,
+      `| Compressed blocks | ${stats.compressed_blocks ?? 0} |`,
+      `| Bytes saved by compression | ${stats.compression_saved_bytes ?? 0} |`,
       `| Unavailable packs skipped | ${stats.pack_loads_skipped ?? 0} |`,
       `| Packs discovered | ${stats.packs_discovered ?? 0} |`,
       `| Manifests discovered | ${stats.manifests_discovered ?? 0} |`,

@@ -33,25 +33,32 @@ var (
 // Bazel downloads shortly after a presence check costs no extra API call.
 const defaultPackRenewInterval = 15 * time.Second
 
+// defaultPackCompressionLevel favours flush latency over ratio: blocks are
+// compressed once on the upload path, and level 3 already captures most of the
+// available saving on cache content.
+const defaultPackCompressionLevel = 3
+
 type Config struct {
-	Backend           cache.Backend
-	Catalog           cache.Catalog
-	CacheDir          string
-	KeyPrefix         string
-	StorageMode       string
-	PackSize          int64
-	PackFlushInterval time.Duration
-	PackRenewInterval time.Duration
-	MaxManifests      int
-	WriteEnabled      bool
-	FailOpen          bool
-	MaxBlobSize       int64
-	MaxConcurrent     int
-	UploadsPerMinute  int
-	BackendTimeout    time.Duration
-	ShutdownToken     string
-	Shutdown          func()
-	Logger            *log.Logger
+	Backend              cache.Backend
+	Catalog              cache.Catalog
+	CacheDir             string
+	KeyPrefix            string
+	StorageMode          string
+	PackSize             int64
+	PackFlushInterval    time.Duration
+	PackRenewInterval    time.Duration
+	PackCompression      bool
+	PackCompressionLevel int64
+	MaxManifests         int
+	WriteEnabled         bool
+	FailOpen             bool
+	MaxBlobSize          int64
+	MaxConcurrent        int
+	UploadsPerMinute     int
+	BackendTimeout       time.Duration
+	ShutdownToken        string
+	Shutdown             func()
+	Logger               *log.Logger
 }
 
 type object struct {
@@ -117,6 +124,12 @@ func New(cfg Config) (*Server, error) {
 		}
 		if cfg.PackRenewInterval <= 0 {
 			cfg.PackRenewInterval = defaultPackRenewInterval
+		}
+		if cfg.PackCompressionLevel == 0 {
+			cfg.PackCompressionLevel = defaultPackCompressionLevel
+		}
+		if cfg.PackCompressionLevel < 1 || cfg.PackCompressionLevel > 19 {
+			return nil, errors.New("pack compression level must be between 1 and 19")
 		}
 		if cfg.MaxManifests <= 0 {
 			return nil, errors.New("maximum manifests must be positive")

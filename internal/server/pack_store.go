@@ -26,6 +26,7 @@ import (
 type packStore struct {
 	server  *Server
 	catalog cache.Catalog
+	codec   *blockCodec
 
 	keyPrefix     string
 	targetSize    int64
@@ -80,9 +81,14 @@ func newPackStore(server *Server) (*packStore, error) {
 	if server.cfg.Catalog == nil {
 		return nil, errors.New("packed storage mode requires a manifest catalog")
 	}
+	codec, err := newBlockCodec(server.cfg.PackCompression, server.cfg.PackCompressionLevel, server.cfg.MaxBlobSize)
+	if err != nil {
+		return nil, err
+	}
 	packs := &packStore{
 		server:          server,
 		catalog:         server.cfg.Catalog,
+		codec:           codec,
 		keyPrefix:       server.cfg.KeyPrefix,
 		targetSize:      server.cfg.PackSize,
 		flushInterval:   server.cfg.PackFlushInterval,
@@ -106,7 +112,7 @@ func newPackStore(server *Server) (*packStore, error) {
 		stop:            make(chan struct{}),
 	}
 	context, cancel := context.WithTimeout(context.Background(), server.cfg.BackendTimeout)
-	err := packs.discover(context)
+	err = packs.discover(context)
 	cancel()
 	if err != nil {
 		server.stats.manifestDiscoveryErrors.Add(1)
@@ -147,6 +153,7 @@ func (p *packStore) close(ctx context.Context) error {
 	p.workers.Wait()
 	err := p.flush(ctx, true)
 	p.renewPending(ctx)
+	p.codec.close()
 	return err
 }
 
@@ -216,7 +223,7 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 	}
 
 	p.mu.Lock()
-	var contentCID, packID string
+	var contentCID, blockCID, encoding, packID string
 	var expectedSize int64
 	if kind == "cas" {
 		entry, found := p.cas[digest]
@@ -224,7 +231,8 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 			p.mu.Unlock()
 			return object{}, false, nil
 		}
-		contentCID, packID, expectedSize = entry.CID, entry.PackID, entry.Size
+		contentCID, blockCID, encoding = entry.CID, entry.Block, entry.Encoding
+		packID, expectedSize = entry.PackID, entry.Size
 	} else {
 		if _, conflict := p.actionConflicts[digest]; conflict {
 			p.server.stats.actionDigestConflicts.Add(1)
@@ -236,7 +244,8 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 			p.mu.Unlock()
 			return object{}, false, nil
 		}
-		contentCID, packID, expectedSize = entry.CID, entry.PackID, entry.Size
+		contentCID, blockCID, encoding = entry.CID, entry.Block, entry.Encoding
+		packID, expectedSize = entry.PackID, entry.Size
 	}
 	p.mu.Unlock()
 
@@ -247,9 +256,22 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 		}
 		return object{}, false, err
 	}
-	data, err := readCARBlock(ctx, path, contentCID, p.server.cfg.MaxBlobSize)
+	stored, err := readCARBlock(ctx, path, blockCID, p.server.cfg.MaxBlobSize)
 	if err != nil {
 		return object{}, false, err
+	}
+	data, err := p.codec.decode(stored, encoding, expectedSize)
+	if err != nil {
+		return object{}, false, err
+	}
+	// The stored block was verified against its own CID; this proves the
+	// decoded bytes are the object the manifest promised.
+	decodedCID, err := rawCIDForData(data)
+	if err != nil {
+		return object{}, false, err
+	}
+	if decodedCID.String() != contentCID {
+		return object{}, false, fmt.Errorf("packed %s/%s does not match its manifest CID", kind, digest)
 	}
 	if int64(len(data)) != expectedSize {
 		return object{}, false, fmt.Errorf("packed %s/%s has size %d; manifest declares %d", kind, digest, len(data), expectedSize)
@@ -584,6 +606,22 @@ type packedEntries struct {
 	actions []manifestAction
 }
 
+// encodeBlock compresses one block and returns the bytes to store, the
+// encoding to record, and the CID addressing those bytes.
+func (p *packStore) encodeBlock(data []byte, contentCID cid.Cid) ([]byte, string, cid.Cid, error) {
+	stored, encoding := p.codec.encode(data)
+	if encoding == blockEncodingRaw {
+		return data, blockEncodingRaw, contentCID, nil
+	}
+	blockCID, err := rawCIDForData(stored)
+	if err != nil {
+		return nil, "", cid.Undef, err
+	}
+	p.server.stats.compressedBlocks.Add(1)
+	p.server.stats.compressionSavedBytes.Add(uint64(len(data) - len(stored)))
+	return stored, encoding, blockCID, nil
+}
+
 func (p *packStore) buildPackLocked(ctx context.Context, casDigests, actionDigests []string) (string, packedEntries, int64, string, error) {
 	type blockEntry struct {
 		cid  cid.Cid
@@ -601,8 +639,18 @@ func (p *packStore) buildPackLocked(ctx context.Context, casDigests, actionDiges
 		if err != nil {
 			return "", packedEntries{}, 0, "", err
 		}
-		blocksToWrite = append(blocksToWrite, blockEntry{cid: contentCID, data: data})
-		entries.cas = append(entries.cas, manifestObject{Digest: digest, CID: contentCID.String(), Size: value.size})
+		stored, encoding, blockCID, err := p.encodeBlock(data, contentCID)
+		if err != nil {
+			return "", packedEntries{}, 0, "", err
+		}
+		blocksToWrite = append(blocksToWrite, blockEntry{cid: blockCID, data: stored})
+		entries.cas = append(entries.cas, manifestObject{
+			Digest:   digest,
+			CID:      contentCID.String(),
+			Block:    blockCID.String(),
+			Encoding: encoding,
+			Size:     value.size,
+		})
 	}
 	for _, digest := range actionDigests {
 		value := p.pendingActions[digest]
@@ -614,8 +662,18 @@ func (p *packStore) buildPackLocked(ctx context.Context, casDigests, actionDiges
 		if err != nil {
 			return "", packedEntries{}, 0, "", err
 		}
-		blocksToWrite = append(blocksToWrite, blockEntry{cid: contentCID, data: data})
-		entries.actions = append(entries.actions, manifestAction{Digest: digest, CID: value.cid, Size: value.object.size})
+		stored, encoding, blockCID, err := p.encodeBlock(data, contentCID)
+		if err != nil {
+			return "", packedEntries{}, 0, "", err
+		}
+		blocksToWrite = append(blocksToWrite, blockEntry{cid: blockCID, data: stored})
+		entries.actions = append(entries.actions, manifestAction{
+			Digest:   digest,
+			CID:      value.cid,
+			Block:    blockCID.String(),
+			Encoding: encoding,
+			Size:     value.object.size,
+		})
 	}
 	if len(blocksToWrite) == 0 {
 		return "", packedEntries{}, 0, "", errors.New("cannot build an empty CARv2 pack")

@@ -52,8 +52,15 @@ A pack is an immutable [CARv2][go-car] file produced with
 - A pack is identified by the SHA-256 of its complete CARv2 bytes and stored
   under an immutable Actions-cache key such as
   `<prefix>-pack-v1-<pack-sha256>`.
-- Packs are not additionally compressed. The GitHub cache transport already
-  compresses its value.
+- Packs are stored uncompressed, and nothing else compresses them either. The
+  cache-v2 client uploads the bytes verbatim to a block blob with no content
+  encoding, and finalizes the entry with the raw length, which is what counts
+  against the repository quota. Individual blocks are therefore compressed with
+  zstd before they are written into the pack, and the manifest records the
+  encoding and the CID of the stored bytes. Per-block rather than per-pack
+  compression keeps the footer index useful, since serving one object
+  decompresses only that object, and lets a single pack mix compressed and
+  verbatim blocks.
 
 Packs should have a modest target size, initially 8 MiB and at most 32 MiB.
 Oversized output blobs receive a single-blob pack. GitHub Actions Cache restores
