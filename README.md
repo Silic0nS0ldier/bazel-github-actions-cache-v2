@@ -243,19 +243,19 @@ Supported over gRPC:
 - `ActionCache.GetActionResult` and `UpdateActionResult`
 - `Capabilities.GetCapabilities`
 - `ByteStream.Read` and `Write` for blobs above the 4 MiB batch limit
-- `asset.v1.Fetch.FetchBlob`, backing `--remote_downloader`
+- `asset.v1.Fetch.FetchBlob`, backing Bazel's remote downloader
 
 ## Caching repository downloads
 
 Action and CAS caching never covers the archives that repository rules fetch,
-because those are extracted outside the action graph. `--remote_downloader`
+because those are extracted outside the action graph. Bazel's remote downloader
 closes that gap:
 
 ```bash
 bazel test //... \
   --remote_cache="$CACHE_URL" \
-  --remote_downloader="$CACHE_URL" \
-  --remote_downloader_local_fallback
+  --experimental_remote_downloader="$CACHE_URL" \
+  --experimental_remote_downloader_local_fallback
 ```
 
 The fallback flag matters: it defaults to `false`, and Bazel treats any non-OK
@@ -263,16 +263,33 @@ fetch as an error rather than a miss, so without it the first build that cannot
 be served fails outright.
 
 A repository rule must declare a checksum for its download to be cached. Bazel
-sends that checksum as a `checksum.sri` qualifier, which is what lets a hit be
-served straight from the CAS. When a rule declares no checksum Bazel explicitly
-forbids cached content, and this server answers `NOT_FOUND`.
+sends it as a `checksum.sri` qualifier, in any of the algorithms it supports:
+`sha1`, `sha256`, `sha384`, `sha512`, and `blake3`. That matters in practice
+because checksums arrive from lockfiles rather than by hand, and npm integrity
+is `sha512`. When a rule declares no checksum Bazel explicitly forbids cached
+content, and this server answers `NOT_FOUND`.
+
+Content is always stored under its sha256, so a `sha256` checksum addresses the
+cache directly. Any other algorithm resolves through an alias recorded the first
+time the asset was fetched. An alias is an action-cache record pointing at the
+blob, which means the existing closure validation applies to it: an alias whose
+blob has been evicted reads as a miss, and in packed mode it travels inside a
+CARv2 pack and renews that pack's retention, rather than costing one
+Actions-cache creation each.
 
 Bazel's downloader never pushes a fetched archive back, so a cache-only
 implementation could never be populated. On a miss this server fetches the asset
-itself, over `https` only, verifies it against the requested checksum before
+itself, over `https` only, verifies it against the declared checksum before
 storing anything, and publishes it so that later jobs get a hit. Credentials are
 never forwarded: `http_header` qualifiers are ignored, so private origins are not
 supported. `asset_downloads` and `asset_fetch_errors` report that activity.
+
+Every failure names the resource it refers to, because Bazel reports the message
+on its own:
+
+```text
+WARNING: Remote Cache: NOT_FOUND: https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz: origin returned HTTP 401
+```
 
 Supported by both:
 
@@ -368,11 +385,11 @@ run untrusted code in a cache-writing job. Fork pull requests are forced
 read-only, but GitHub's general guidance about untrusted workflows and
 self-hosted runners still applies.
 
-Serving `--remote_downloader` means the server makes outbound requests to URIs a
-caller supplies. Those are restricted to `https`, may not be redirected off it,
-are bounded by `max-blob-size-mb`, and are discarded unless they match the
-checksum the caller asked for. No credential is ever attached, so this grants a
-caller nothing it could not already do by fetching the URI itself.
+Serving Bazel's remote downloader means the server makes outbound requests to
+URIs a caller supplies. Those are restricted to `https`, may not be redirected
+off it, are bounded by `max-blob-size-mb`, and are discarded unless they match
+the checksum the caller asked for. No credential is ever attached, so this
+grants a caller nothing it could not already do by fetching the URI itself.
 
 Action-cache values cannot be content-verified against the action digest (the
 digest addresses the action, not the serialized result). Cache poisoning is
