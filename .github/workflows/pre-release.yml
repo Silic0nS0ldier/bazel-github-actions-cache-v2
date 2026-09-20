@@ -1,0 +1,42 @@
+name: Pre-release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pre-release
+  cancel-in-progress: false
+
+jobs:
+  pre-release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+          cache: true
+      - name: Choose a timestamped version
+        id: version
+        run: echo "version=pre-$(date -u +%Y%m%dT%H%M%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        uses: ./.github/actions/publish-release
+        with:
+          version: ${{ steps.version.outputs.version }}
+          prerelease: "true"
+          token: ${{ github.token }}
+          notes: |
+            Automatic pre-release built from `${{ github.sha }}` on `main`.
+
+            Not intended for production use. Pin a `v*` release instead.

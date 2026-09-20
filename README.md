@@ -361,14 +361,53 @@ go vet ./...
 go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 node --test action/*.test.js
-VERSION=v0.3.2 scripts/build-dist.sh
-git diff --exit-code -- dist
+VERSION=dev scripts/build-dist.sh
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 
 Release binaries are built with `CGO_ENABLED=0`, `-trimpath`, and an empty Go
-build ID, with VCS stamping disabled, for deterministic Linux amd64/arm64 output. CI rebuilds them and
-requires a byte-for-byte match.
+build ID, with VCS stamping disabled, for deterministic Linux amd64/arm64
+output. CI builds them twice and requires both builds to produce identical
+checksums.
+
+`dist/` is not tracked in Git, and neither is any other build output. The action
+resolves its server binary in two steps:
+
+1. If `dist/cache-server-linux-<arch>` exists in the checkout, it is used
+   directly. This is how local development, CI, and the smoke workflow exercise
+   the code under review rather than a published artifact.
+2. Otherwise the binary is downloaded from the release the action itself was
+   pinned to, and its build provenance is verified with
+   `gh attestation verify` before it is allowed to run.
+
+Nothing in the repository records which release to use. `GITHUB_ACTION_REF` is
+the ref from your `uses:` line, so `@v0.4.0` names its release directly, and a
+commit pin is mapped back to the tag released from it. `GITHUB_ACTION_REPOSITORY`
+supplies the repository, so a fork downloads its own releases instead of binaries
+built from somebody else's source, with nothing to edit after forking.
+
+Integrity rests on
+[artifact attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations):
+the release workflows sign the binaries with `actions/attest-build-provenance`,
+and the action refuses to run one that does not verify against the publishing
+repository. Only someone who can add a workflow to that repository can produce a
+passing attestation, so no checksum has to be committed alongside the action.
+
+## Releases
+
+Release tags point at the reviewed commit itself, so the tree a consumer checks
+out is exactly the tree CI ran against. Enable
+[immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
+on the repository to lock those tags and assets after publication; the workflows
+already draft, attach, then publish, which is the order that requires.
+
+| Workflow | Trigger | Tag | Marked |
+| --- | --- | --- | --- |
+| `Pre-release` | push to `main` | `pre-<UTC timestamp>` | pre-release |
+| `Release` | `workflow_dispatch` with a `version` input | the given `v*` tag | latest |
+
+Neither workflow commits anything. A release is a tag, a set of assets, and an
+attestation; the default branch is never rewritten by CI.
 
 The smoke workflow has two modes. A default-branch push seeds a stable packed
 object. A separate `workflow_dispatch` restore run downloads the manifest and

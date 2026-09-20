@@ -30,9 +30,14 @@ jobs:
         run: node --test action/*.test.js
       - name: Actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-      - name: Rebuild packaged binaries
+      - name: Build packaged binaries
         env:
-          VERSION: v0.3.2
+          VERSION: ci-${{ github.sha }}
         run: scripts/build-dist.sh
       - name: Verify packaged binaries are reproducible
-        run: git diff --exit-code -- dist
+        env:
+          VERSION: ci-${{ github.sha }}
+        run: |
+          mv dist/SHA256SUMS "$RUNNER_TEMP/SHA256SUMS.first"
+          scripts/build-dist.sh
+          diff "$RUNNER_TEMP/SHA256SUMS.first" dist/SHA256SUMS

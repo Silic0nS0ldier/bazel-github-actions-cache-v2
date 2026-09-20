@@ -16,6 +16,7 @@ const {
   saveState,
   setOutput,
 } = require("./lib");
+const { resolveServerBinary } = require("./release");
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -58,10 +59,15 @@ async function main() {
     throw new Error(`unsupported Linux architecture: ${process.arch}`);
   }
   const actionRoot = path.resolve(__dirname, "..");
-  const binary = path.join(actionRoot, "dist", `cache-server-linux-${architecture}`);
-  if (!fs.existsSync(binary)) {
-    throw new Error(`packaged server binary is missing: ${binary}`);
-  }
+  const binary = await resolveServerBinary({
+    actionRoot,
+    architecture,
+    repository: process.env.GITHUB_ACTION_REPOSITORY,
+    ref: process.env.GITHUB_ACTION_REF,
+    token: githubToken || process.env.GITHUB_TOKEN || "",
+    toolCacheRoot: path.resolve(process.env.RUNNER_TOOL_CACHE || process.env.RUNNER_TEMP || os.tmpdir()),
+    log: (message) => process.stdout.write(`${message}${os.EOL}`),
+  });
 
   const writeEnabled = resolveWriteMode(input("write", "auto"));
   const failOpen = !parseBoolean(input("fail-on-cache-error", "false"), "fail-on-cache-error");
