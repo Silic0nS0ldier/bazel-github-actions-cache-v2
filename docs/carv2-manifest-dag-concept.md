@@ -63,8 +63,17 @@ small CAS read into excessive transfer.
 ### Manifest
 
 A manifest is a small immutable DAG-CBOR block encoded with
-`go-ipld-prime`. Its CID is the manifest identifier and its Actions-cache key
-is derived from that CID.
+`go-ipld-prime`. Its CID is the manifest identifier, and its Actions-cache key
+pairs that CID with the single pack the manifest commits:
+`<prefix>-car-manifest-v2-<pack-sha256>-<manifest-cid>`.
+
+The pairing is what makes the two entries share a fate. Every mapping a
+manifest introduces lives in that one pack, so once the pack is gone the
+manifest has nothing left to offer and a reader can tell that from the key
+alone. This matters because a read renews an entry's retention: a manifest that
+is downloaded on every run never ages out, while the much larger pack it
+describes is evicted under the repository quota. Leaving orphaned manifests
+unread lets them expire on the same schedule as the data they describe.
 
 The implemented DAG-CBOR schema has this logical content:
 
@@ -136,7 +145,8 @@ merge.
 
 ## Read protocol and eviction
 
-1. Bootstrap an in-memory manifest view from all discoverable heads.
+1. Bootstrap an in-memory manifest view from all discoverable heads. Manifests
+   whose pack is absent from the pack listing are skipped without being read.
 2. For `GET /ac/<action-digest>`, resolve the Action Result mapping, restore its
    pack, and validate every declared closure pack and referenced CAS digest.
 3. For `GET /cas/<digest>`, resolve its pack, restore it on demand, look up the
@@ -147,6 +157,9 @@ merge.
 GitHub can evict any cache entry independently. The manifest must therefore not
 be treated as a promise that a pack still exists. This retains the v0.2 safety
 property that incomplete Action Results are never served.
+
+A checkpoint manifest that commits several packs at once does not fit the
+single-pack key, and needs its own key scheme before compaction can be added.
 
 ## Rollout and validation
 

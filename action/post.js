@@ -78,6 +78,7 @@ async function post() {
       `| Packs discovered | ${stats.packs_discovered ?? 0} |`,
       `| Manifests discovered | ${stats.manifests_discovered ?? 0} |`,
       `| Manifests skipped | ${stats.manifests_skipped ?? 0} |`,
+      `| Orphaned manifests | ${stats.manifests_orphaned ?? 0} |`,
       `| Action-digest conflicts | ${stats.action_digest_conflicts ?? 0} |`,
       `| Read-only discarded uploads | ${stats.discarded_uploads ?? 0} |`,
       `| Backend downloads | ${stats.backend_downloads ?? 0} |`,

@@ -45,12 +45,12 @@ func TestActionsCatalogFollowsShortPagesToTheFinalLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog := &ActionsCatalog{baseURL: baseURL, repository: "owner/repository", token: "token", client: server.Client()}
-	keys, skipped, err := catalog.List(context.Background(), "prefix-manifest-", 10)
+	keys, err := catalog.List(context.Background(), "prefix-manifest-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(keys, ",") != "prefix-manifest-one,prefix-manifest-two" || skipped != 0 || requests != 2 {
-		t.Fatalf("keys/skipped/requests = %v/%d/%d", keys, skipped, requests)
+	if strings.Join(keys, ",") != "prefix-manifest-one,prefix-manifest-two" || requests != 2 {
+		t.Fatalf("keys/requests = %v/%d", keys, requests)
 	}
 }
 
@@ -65,44 +65,8 @@ func TestActionsCatalogRejectsPaginationLinkToAnotherHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog := &ActionsCatalog{baseURL: baseURL, repository: "owner/repository", token: "token", client: server.Client()}
-	if _, _, err := catalog.List(context.Background(), "prefix-", UnboundedListing); err == nil {
+	if _, err := catalog.List(context.Background(), "prefix-"); err == nil {
 		t.Fatal("pagination followed a link to another host")
-	}
-}
-
-func TestActionsCatalogReportsUnlistedCountAtLimit(t *testing.T) {
-	totalCount := "5"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"total_count":` + totalCount + `,"actions_caches":[{"key":"prefix-one"},{"key":"prefix-two"}]}`))
-	}))
-	defer server.Close()
-	baseURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog := &ActionsCatalog{baseURL: baseURL, repository: "owner/repository", token: "token", client: server.Client()}
-	keys, skipped, err := catalog.List(context.Background(), "prefix-", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(keys, ",") != "prefix-one" || skipped != 4 {
-		t.Fatalf("bounded keys/skipped = %v/%d", keys, skipped)
-	}
-	keys, skipped, err = catalog.List(context.Background(), "prefix-", UnboundedListing)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(keys, ",") != "prefix-one,prefix-two" || skipped != 0 {
-		t.Fatalf("unbounded keys/skipped = %v/%d", keys, skipped)
-	}
-
-	// Without a usable total_count only the entry that tripped the limit is
-	// known to be unlisted, and the count must never collapse to zero.
-	totalCount = "0"
-	if _, skipped, err = catalog.List(context.Background(), "prefix-", 1); err != nil {
-		t.Fatal(err)
-	} else if skipped != 1 {
-		t.Fatalf("skipped without total_count = %d", skipped)
 	}
 }
 
@@ -123,7 +87,7 @@ func TestActionsCatalogLogsKeysOutsideTheRequestedPrefix(t *testing.T) {
 		client:     server.Client(),
 		logger:     log.New(&logged, "", 0),
 	}
-	keys, _, err := catalog.List(context.Background(), "prefix-", UnboundedListing)
+	keys, err := catalog.List(context.Background(), "prefix-")
 	if err != nil {
 		t.Fatal(err)
 	}
