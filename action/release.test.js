@@ -84,6 +84,23 @@ test("a commit that was never released is reported as such", async (t) => {
   );
 });
 
+// A tag name reaches both a download URL and the path of the binary that gets
+// executed, so a hostile one must never be taken at face value.
+test("a tag name that could escape its directory is rejected", async (t) => {
+  for (const ref of [
+    "refs/tags/../../../../tmp/evil",
+    "refs/tags/v1.2.3/../../..",
+    "refs/tags/v1;rm -rf /",
+    "refs/tags/",
+  ]) {
+    stubFetch(t, () => jsonResponse([{ ref, object: { type: "commit", sha: COMMIT } }]));
+    await assert.rejects(
+      releaseVersion({ repository: REPOSITORY, ref: COMMIT }),
+      /unusable release tag/,
+    );
+  }
+});
+
 test("a ref that names no release at all is rejected", async () => {
   for (const ref of [undefined, "", "refs/heads/main", "feature branch"]) {
     await assert.rejects(
@@ -118,23 +135,30 @@ test("an action running from an unknown repository will not guess where to downl
   );
 });
 
-test("an already verified binary is reused from the tool cache", async (t) => {
+test("an already verified binary is installed at the fixed path that gets executed", async (t) => {
   const root = workspace(t);
   const toolCacheRoot = path.join(root, "tools");
+  const version = "v1.2.3";
   const cached = path.join(
     toolCacheRoot,
     "bazel-gha-cache-server",
-    "v1.2.3",
+    version,
     "amd64",
     assetName("amd64"),
   );
   fs.mkdirSync(path.dirname(cached), { recursive: true });
   fs.writeFileSync(cached, "previously verified");
+  const installPath = path.join(root, "cache-server");
 
-  assert.strictEqual(
-    await resolve({ actionRoot: path.join(root, "checkout"), toolCacheRoot }),
-    cached,
-  );
+  const resolved = await resolve({
+    actionRoot: path.join(root, "checkout"),
+    installPath,
+    toolCacheRoot,
+  });
+  assert.strictEqual(resolved, installPath);
+  assert.strictEqual(fs.readFileSync(resolved, "utf8"), "previously verified");
+  // The executed path must carry no trace of the release it came from.
+  assert.ok(!resolved.includes(version), `${resolved} still names the release`);
 });
 
 test("a download that lands on plain HTTP is refused before the body is read", async (t) => {
@@ -171,10 +195,15 @@ test("a binary whose provenance cannot be verified is discarded", async (t) => {
   });
 
   await assert.rejects(
-    resolve({ actionRoot: path.join(root, "checkout"), toolCacheRoot }),
+    resolve({
+      actionRoot: path.join(root, "checkout"),
+      installPath: path.join(root, "cache-server"),
+      toolCacheRoot,
+    }),
     /provenance|GitHub CLI/,
   );
   const cacheDir = path.join(toolCacheRoot, "bazel-gha-cache-server", "v1.2.3", "amd64");
   const leftovers = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : [];
   assert.deepStrictEqual(leftovers, [], "an unverified download must not be left behind");
+  assert.ok(!fs.existsSync(path.join(root, "cache-server")), "nothing must be installed");
 });

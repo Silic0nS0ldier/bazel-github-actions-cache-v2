@@ -50,6 +50,16 @@ async function githubJson(url, token) {
   return response.json();
 }
 
+// requireTag rejects anything that could not be a release tag. The value becomes
+// both a URL segment and a path segment on the way to an executable, so it is
+// checked here rather than at each use.
+function requireTag(tag, problem) {
+  if (!TAG_PATTERN.test(String(tag ?? ""))) {
+    throw new Error(problem);
+  }
+  return String(tag);
+}
+
 // releaseVersion works out which release publishes the binary for the running
 // copy of the action. `uses: owner/repo@v1.2.3` names its release directly; a
 // commit pin has to be mapped back to the tag that was released from it.
@@ -64,12 +74,13 @@ async function releaseVersion({ repository, ref, token }) {
     if (!match) {
       throw new Error(`no release tag points at ${ref}; pin a released tag or commit`);
     }
-    return match.ref.replace(/^refs\/tags\//, "");
+    const tag = String(match.ref).replace(/^refs\/tags\//, "");
+    return requireTag(tag, `${repository} has an unusable release tag at ${ref}`);
   }
-  if (!TAG_PATTERN.test(String(ref ?? ""))) {
-    throw new Error("cannot tell which release to use; pin this action to a release tag or commit");
-  }
-  return ref;
+  return requireTag(
+    ref,
+    "cannot tell which release to use; pin this action to a release tag or commit",
+  );
 }
 
 // verifyAttestation proves the binary came out of a workflow in the repository
@@ -101,12 +112,27 @@ function verifyAttestation({ file, repository, token }) {
   });
 }
 
+// install places a verified binary at a caller-chosen constant path. The value
+// that reaches the process spawner is then built entirely from constants, so a
+// release name cannot influence which program runs.
+function install(source, destination) {
+  fs.rmSync(destination, { force: true });
+  try {
+    fs.linkSync(source, destination);
+  } catch {
+    fs.copyFileSync(source, destination);
+  }
+  fs.chmodSync(destination, 0o700);
+  return destination;
+}
+
 // resolveServerBinary returns a cache-server binary for this runner. A locally
 // built dist/ always wins so that CI and the smoke workflow exercise the code
 // under review rather than a published artifact.
 async function resolveServerBinary({
   actionRoot,
   architecture,
+  installPath,
   repository,
   ref,
   token,
@@ -128,17 +154,16 @@ async function resolveServerBinary({
   }
 
   const version = await releaseVersion({ repository, ref, token });
-  const cacheDir = path.join(toolCacheRoot, "bazel-gha-cache-server", version, architecture);
-  const cached = path.join(cacheDir, asset);
+  const cached = path.join(toolCacheRoot, "bazel-gha-cache-server", version, architecture, asset);
   if (fs.existsSync(cached)) {
     log(`using cached ${asset} from ${version}`);
-    return cached;
+    return install(cached, installPath);
   }
 
   const url = releaseAssetUrl(repository, version, asset);
   log(`downloading ${url}`);
   const bytes = await download(url);
-  fs.mkdirSync(cacheDir, { recursive: true });
+  fs.mkdirSync(path.dirname(cached), { recursive: true });
   const spool = `${cached}.${process.pid}.part`;
   fs.writeFileSync(spool, bytes, { mode: 0o700 });
   try {
@@ -149,7 +174,7 @@ async function resolveServerBinary({
   }
   log(`verified the build provenance of ${asset} from ${version}`);
   fs.renameSync(spool, cached);
-  return cached;
+  return install(cached, installPath);
 }
 
 module.exports = {
