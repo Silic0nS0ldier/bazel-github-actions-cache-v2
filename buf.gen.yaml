@@ -1,7 +1,11 @@
 # Generated code is committed to the repository; run scripts/generate-proto.sh to refresh it.
+# The googleapis commit below must match the one pinned in proto/buf.lock.
 version: v2
 inputs:
   - directory: proto
+  - module: buf.build/googleapis/googleapis:c17df5b2beca46928cc87d5656bd5343
+    paths:
+      - google/bytestream/bytestream.proto
 plugins:
   # google.golang.org/protobuf >= 1.36 opaque API: struct fields are hidden behind
   # accessors, which lets the runtime pick a more compact in-memory layout.
@@ -12,3 +16,11 @@ plugins:
       - default_api_level=API_OPAQUE
       - Mbuild/bazel/semver/semver.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/semver;semver
       - Mbuild/bazel/remote/execution/v2/remote_execution.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/execution/v2;remoteexecution
+      - Mgoogle/bytestream/bytestream.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/google/bytestream;bytestream
+  - local: protoc-gen-go-grpc
+    out: internal/proto/gen
+    opt:
+      - paths=source_relative
+      - Mbuild/bazel/semver/semver.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/semver;semver
+      - Mbuild/bazel/remote/execution/v2/remote_execution.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/execution/v2;remoteexecution
+      - Mgoogle/bytestream/bytestream.proto=github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/google/bytestream;bytestream

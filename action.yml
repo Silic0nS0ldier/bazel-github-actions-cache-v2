@@ -69,15 +69,23 @@ inputs:
     description: "Loopback port; zero selects an available dynamic port"
     required: false
     default: "0"
+  grpc-port:
+    description: "Loopback port for the gRPC remote-cache API; zero selects an available dynamic port"
+    required: false
+    default: "0"
 outputs:
   url:
     description: "Loopback Bazel HTTP remote-cache URL"
+  grpc-url:
+    description: "Loopback Bazel gRPC remote-cache URL"
   stats-url:
     description: "Loopback JSON statistics endpoint available until the post-step"
   writable:
     description: "Whether validated objects are published to GitHub Actions cache"
   bazel-args:
-    description: "Ready-to-use --remote_cache and --remote_upload_local_results flags"
+    description: "Ready-to-use --remote_cache and --remote_upload_local_results flags for the HTTP endpoint"
+  grpc-bazel-args:
+    description: "Ready-to-use --remote_cache and --remote_upload_local_results flags for the gRPC endpoint"
   initial-stats:
     description: "Initial statistics JSON"
   final-stats:

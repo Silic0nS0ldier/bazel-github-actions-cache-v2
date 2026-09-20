@@ -8,11 +8,13 @@ import (
 // Stats is a point-in-time JSON representation of cache activity.
 type Stats struct {
 	Requests                   uint64 `json:"requests"`
+	Operations                 uint64 `json:"operations"`
 	Hits                       uint64 `json:"hits"`
 	Misses                     uint64 `json:"misses"`
 	Uploads                    uint64 `json:"uploads"`
 	DeduplicatedUploads        uint64 `json:"deduplicated_uploads"`
 	DiscardedUploads           uint64 `json:"discarded_uploads"`
+	BackendRequests            uint64 `json:"backend_requests"`
 	BackendDownloads           uint64 `json:"backend_downloads"`
 	BackendExistenceChecks     uint64 `json:"backend_existence_checks"`
 	BackendLoadErrors          uint64 `json:"backend_load_errors"`
@@ -43,11 +45,13 @@ type Stats struct {
 
 type counters struct {
 	requests                   atomic.Uint64
+	operations                 atomic.Uint64
 	hits                       atomic.Uint64
 	misses                     atomic.Uint64
 	uploads                    atomic.Uint64
 	deduplicatedUploads        atomic.Uint64
 	discardedUploads           atomic.Uint64
+	backendRequests            atomic.Uint64
 	backendDownloads           atomic.Uint64
 	backendExistenceChecks     atomic.Uint64
 	backendLoadErrors          atomic.Uint64
@@ -79,11 +83,13 @@ type counters struct {
 func (c *counters) snapshot() Stats {
 	return Stats{
 		Requests:                   c.requests.Load(),
+		Operations:                 c.operations.Load(),
 		Hits:                       c.hits.Load(),
 		Misses:                     c.misses.Load(),
 		Uploads:                    c.uploads.Load(),
 		DeduplicatedUploads:        c.deduplicatedUploads.Load(),
 		DiscardedUploads:           c.discardedUploads.Load(),
+		BackendRequests:            c.backendRequests.Load(),
 		BackendDownloads:           c.backendDownloads.Load(),
 		BackendExistenceChecks:     c.backendExistenceChecks.Load(),
 		BackendLoadErrors:          c.backendLoadErrors.Load(),

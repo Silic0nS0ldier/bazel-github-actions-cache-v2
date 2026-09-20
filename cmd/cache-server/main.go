@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/cre4ture/bazel-github-actions-cache-v2/internal/cache"
 	cacheserver "github.com/cre4ture/bazel-github-actions-cache-v2/internal/server"
 )
@@ -23,6 +25,7 @@ var version = "dev"
 
 type readyInfo struct {
 	URL      string `json:"url"`
+	GRPCURL  string `json:"grpc_url"`
 	StatsURL string `json:"stats_url"`
 	PID      int    `json:"pid"`
 	Version  string `json:"version"`
@@ -38,6 +41,7 @@ func main() {
 func run() error {
 	var (
 		port             = flag.Int("port", 0, "loopback TCP port; zero selects a dynamic port")
+		grpcPort         = flag.Int("grpc-port", 0, "loopback TCP port for the gRPC remote-cache API; zero selects a dynamic port")
 		cacheDir         = flag.String("cache-dir", "", "local spool directory")
 		keyPrefix        = flag.String("key-prefix", "bazel-http-v1", "GitHub cache key prefix")
 		storageMode      = flag.String("storage-mode", "objects", "storage mode: objects or packs")
@@ -83,6 +87,14 @@ func run() error {
 	defer listener.Close()
 	address := listener.Addr().(*net.TCPAddr)
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(address.Port)
+
+	grpcListener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(*grpcPort)))
+	if err != nil {
+		return fmt.Errorf("listen on loopback for gRPC: %w", err)
+	}
+	defer grpcListener.Close()
+	grpcAddress := grpcListener.Addr().(*net.TCPAddr)
+	grpcURL := "grpc://127.0.0.1:" + strconv.Itoa(grpcAddress.Port)
 
 	shutdownRequested := make(chan struct{}, 1)
 	requestShutdown := func() {
@@ -134,17 +146,22 @@ func run() error {
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    16 * 1024,
 	}
-	serveErr := make(chan error, 1)
+	serveErr := make(chan error, 2)
 	go func() {
-		err := httpServer.Serve(listener)
-		if err != nil && err != http.ErrServerClosed {
-			serveErr <- err
+		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+			serveErr <- fmt.Errorf("serve http: %w", err)
 		}
-		close(serveErr)
+	}()
+	grpcServer := srv.GRPCHandler()
+	go func() {
+		if err := grpcServer.Serve(grpcListener); err != nil && err != grpc.ErrServerStopped {
+			serveErr <- fmt.Errorf("serve grpc: %w", err)
+		}
 	}()
 
 	ready := readyInfo{
 		URL:      baseURL,
+		GRPCURL:  grpcURL,
 		StatsURL: baseURL + "/stats",
 		PID:      os.Getpid(),
 		Version:  version,
@@ -156,7 +173,7 @@ func run() error {
 	if err := os.WriteFile(*readyFile, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write ready file: %w", err)
 	}
-	logger.Printf("ready on %s (write=%t, fail_open=%t)", baseURL, *writeEnabled, *failOpen)
+	logger.Printf("ready on %s and %s (write=%t, fail_open=%t)", baseURL, grpcURL, *writeEnabled, *failOpen)
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -167,9 +184,7 @@ func run() error {
 	case <-shutdownRequested:
 		logger.Printf("shutdown requested")
 	case err := <-serveErr:
-		if err != nil {
-			return fmt.Errorf("serve: %w", err)
-		}
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -178,6 +193,7 @@ func run() error {
 		logger.Printf("graceful shutdown failed: %v", err)
 		_ = httpServer.Close()
 	}
+	stopGRPC(grpcServer)
 	flushContext, flushCancel := context.WithTimeout(context.Background(), *backendTimeout)
 	if err := srv.Close(flushContext); err != nil {
 		logger.Printf("flush packed cache: %v", err)
@@ -189,4 +205,19 @@ func run() error {
 	}
 	logger.Printf("stopped: %s", strings.TrimSpace(string(stats.JSON())))
 	return nil
+}
+
+// stopGRPC drains in-flight RPCs, but does not let a stuck stream hold up the
+// post step that has to flush the cache before the job ends.
+func stopGRPC(server *grpc.Server) {
+	stopped := make(chan struct{})
+	go func() {
+		server.GracefulStop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		server.Stop()
+	}
 }

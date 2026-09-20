@@ -38,6 +38,7 @@ func (s *Server) degrade(failure error) error {
 // readObject resolves an object and, for action results, validates that its CAS
 // closure is still complete.
 func (s *Server) readObject(ctx context.Context, kind, digest string) (object, error) {
+	s.stats.operations.Add(1)
 	obj, found, err := s.resolve(ctx, s.objectKey(kind, digest), kind, digest)
 	if err != nil {
 		s.stats.backendLoadErrors.Add(1)
@@ -81,6 +82,7 @@ func (s *Server) openObject(ctx context.Context, kind, digest string) (*os.File,
 // mode allows it. Bazel issues these while building without needing the bytes,
 // so restoring a whole pack to answer one would defeat the point.
 func (s *Server) casPresence(ctx context.Context, digest string) (int64, error) {
+	s.stats.operations.Add(1)
 	size, found, err := s.presence(ctx, s.objectKey("cas", digest))
 	if err != nil {
 		s.cfg.Logger.Printf("presence check for cas/%s failed: %s", digest, safeError(err))
@@ -91,6 +93,31 @@ func (s *Server) casPresence(ctx context.Context, digest string) (int64, error) 
 	}
 	s.stats.hits.Add(1)
 	return size, nil
+}
+
+// implicitEmptyCASHit records the zero-byte CAS digest, which every transport
+// answers from the digest alone without consulting storage.
+func (s *Server) implicitEmptyCASHit() {
+	s.stats.operations.Add(1)
+	s.stats.hits.Add(1)
+}
+
+// readObjectBytes returns a whole object. Callers are responsible for bounding
+// the size beforehand, so it suits action results, directories, and batched
+// blobs rather than arbitrary CAS reads.
+func (s *Server) readObjectBytes(ctx context.Context, kind, digest string) ([]byte, error) {
+	file, size, err := s.openObject(ctx, kind, digest)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data := make([]byte, size)
+	if _, err := io.ReadFull(file, data); err != nil {
+		s.cfg.Logger.Printf("read local cache object %s/%s: %v", kind, digest, err)
+		return nil, errLocalFailure
+	}
+	s.stats.bytesServed.Add(uint64(len(data)))
+	return data, nil
 }
 
 func (s *Server) validateStoredActionResult(ctx context.Context, digest string, obj object) error {
@@ -126,6 +153,7 @@ func (s *Server) writeObject(
 	body io.Reader,
 	size int64,
 ) error {
+	s.stats.operations.Add(1)
 	file, err := os.CreateTemp(s.cfg.CacheDir, "upload-*")
 	if err != nil {
 		s.cfg.Logger.Printf("create upload spool for %s/%s: %v", kind, digest, err)

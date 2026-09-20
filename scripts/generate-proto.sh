@@ -12,7 +12,7 @@ project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # Keep protoc_gen_go_version in sync with google.golang.org/protobuf in go.mod and
 # grpc_version in sync with google.golang.org/grpc.
 buf_version=v1.73.0
-protoc_gen_go_version=v1.36.11
+protoc_gen_go_version=v1.36.12
 protoc_gen_go_grpc_version=v1.5.1
 
 # bazelbuild/remote-apis tag v2.12.0.
