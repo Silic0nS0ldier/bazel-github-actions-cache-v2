@@ -88,6 +88,13 @@ manifest a child of every head they observed. Parallel writers can therefore
 publish siblings without overwriting each other. Readers discover and merge all
 heads. If two manifests contain different Action Results for the same action
 digest, that digest is treated as a cache miss rather than picking one result.
+
+Discovery makes two listings: a bounded one for manifests, honouring
+`max-manifests` and newest first, and an unbounded one for packs. A manifest can
+outlive the pack it references, because GitHub evicts entries independently.
+When the pack listing shows that a pack is gone, its entries are resolved as
+ordinary cache misses without attempting a download; `packs_discovered` and
+`pack_loads_skipped` report that in the final statistics.
 Manifest discovery is eventually consistent by design: an unseen manifest is
 only a temporary miss.
 
@@ -131,7 +138,7 @@ Do not enable Bazel remote-cache compression with this release.
 | `storage-mode` | `objects` | `objects` (v0.2) or `packs` (CARv2 and manifest DAG) |
 | `pack-size-mb` | `8` | Target size for a CARv2 archive; only for `packs`, 1–32 MiB |
 | `pack-flush-seconds` | `30` | Maximum local staging interval; only for `packs` |
-| `max-manifests` | `2048` | Bound on REST-discovered immutable manifests; only for `packs` |
+| `max-manifests` | `2048` | Maximum manifests downloaded during discovery; only for `packs` |
 | `github-token` | `${{ github.token }}` | `actions: read` token for packed-manifest discovery |
 | `max-blob-size-mb` | `512` | Maximum spooled upload/download size |
 | `max-concurrent-operations` | `4` | Backend-operation backpressure |

@@ -26,6 +26,7 @@ type memoryBackend struct {
 	existsErr error
 	saveErr   error
 	saves     int
+	loads     int
 }
 
 type blockingSaveBackend struct {
@@ -52,6 +53,7 @@ func newMemoryBackend() *memoryBackend {
 func (b *memoryBackend) Load(_ context.Context, key string, dst io.Writer) (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.loads++
 	if b.loadErr != nil {
 		return false, b.loadErr
 	}
@@ -61,6 +63,12 @@ func (b *memoryBackend) Load(_ context.Context, key string, dst io.Writer) (bool
 	}
 	_, err := dst.Write(data)
 	return true, err
+}
+
+func (b *memoryBackend) loadCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.loads
 }
 
 func (b *memoryBackend) Exists(_ context.Context, key string) (bool, error) {

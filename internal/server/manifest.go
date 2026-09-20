@@ -514,12 +514,18 @@ func validCID(value string) bool {
 	return err == nil
 }
 
+// carKeyPrefix is the namespace shared by pack and manifest keys, so a single
+// catalog listing can enumerate both.
+func carKeyPrefix(prefix string) string {
+	return prefix + "-car-"
+}
+
 func packKeyFor(prefix, id string) string {
-	return prefix + "-car-pack-v1-" + id
+	return carKeyPrefix(prefix) + "pack-v1-" + id
 }
 
 func manifestKeyFor(prefix, id string) string {
-	return prefix + "-car-manifest-v1-" + id
+	return carKeyPrefix(prefix) + "manifest-v1-" + id
 }
 
 func stringsHasSuffix(value, suffix string) bool {

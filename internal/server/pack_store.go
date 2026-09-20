@@ -45,6 +45,9 @@ type packStore struct {
 	pendingBytes    int64
 	loadedPacks     map[string]string
 	loadingPacks    map[string]*packLoad
+	listedPacks     map[string]struct{}
+	packsListed     bool
+	missingPacks    map[string]struct{}
 
 	flushRequests chan struct{}
 	stop          chan struct{}
@@ -63,6 +66,11 @@ type packLoad struct {
 	path string
 	err  error
 }
+
+// errPackUnavailable marks a permanent answer about an immutable pack key:
+// evicted, out of this job's cache scope, or corrupt. It is a cache miss rather
+// than a backend outage, and it is never worth retrying within a job.
+var errPackUnavailable = errors.New("pack is unavailable")
 
 func newPackStore(server *Server) (*packStore, error) {
 	if server.cfg.Catalog == nil {
@@ -84,6 +92,8 @@ func newPackStore(server *Server) (*packStore, error) {
 		pendingActions:  make(map[string]pendingAction),
 		loadedPacks:     make(map[string]string),
 		loadingPacks:    make(map[string]*packLoad),
+		listedPacks:     make(map[string]struct{}),
+		missingPacks:    make(map[string]struct{}),
 		flushRequests:   make(chan struct{}, 1),
 		stop:            make(chan struct{}),
 	}
@@ -220,6 +230,9 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 
 	path, err := p.loadPack(ctx, packID)
 	if err != nil {
+		if errors.Is(err, errPackUnavailable) {
+			return object{}, false, nil
+		}
 		return object{}, false, err
 	}
 	data, err := readCARBlock(ctx, path, contentCID, p.server.cfg.MaxBlobSize)
@@ -303,7 +316,22 @@ func (p *packStore) loadPack(ctx context.Context, packID string) (string, error)
 	descriptor, exists := p.packs[packID]
 	if !exists {
 		p.mu.Unlock()
-		return "", fmt.Errorf("manifest references unavailable pack %s", packID)
+		return "", fmt.Errorf("manifest references unknown pack %s: %w", packID, errPackUnavailable)
+	}
+	if _, unavailable := p.missingPacks[packID]; unavailable {
+		p.mu.Unlock()
+		p.server.stats.packLoadsSkipped.Add(1)
+		return "", fmt.Errorf("pack %s is not restorable in this job: %w", packID, errPackUnavailable)
+	}
+	// The catalog lists every ref, so a pack absent from it is definitely gone.
+	// A listed pack may still be out of this job's cache scope, which only a
+	// failed download can reveal.
+	if _, listed := p.listedPacks[packID]; p.packsListed && !listed {
+		p.missingPacks[packID] = struct{}{}
+		p.mu.Unlock()
+		p.server.stats.packLoadsSkipped.Add(1)
+		p.server.cfg.Logger.Printf("pack %s is absent from the cache listing; its entries are cache misses", packID)
+		return "", fmt.Errorf("pack %s is not restorable in this job: %w", packID, errPackUnavailable)
 	}
 	loading := &packLoad{done: make(chan struct{})}
 	p.loadingPacks[packID] = loading
@@ -314,6 +342,10 @@ func (p *packStore) loadPack(ctx context.Context, packID string) (string, error)
 	if err == nil {
 		p.loadedPacks[packID] = path
 		loading.path = path
+	}
+	if errors.Is(err, errPackUnavailable) {
+		p.missingPacks[packID] = struct{}{}
+		p.server.cfg.Logger.Printf("pack %s cannot be restored; its entries are cache misses: %s", packID, safeError(err))
 	}
 	loading.err = err
 	delete(p.loadingPacks, packID)
@@ -343,7 +375,7 @@ func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor)
 		return "", err
 	}
 	if !found {
-		return "", fmt.Errorf("pack %s is missing", descriptor.ID)
+		return "", fmt.Errorf("pack %s is missing: %w", descriptor.ID, errPackUnavailable)
 	}
 	p.server.stats.backendDownloads.Add(1)
 	p.server.stats.packDownloads.Add(1)
@@ -352,7 +384,7 @@ func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor)
 		return "", err
 	}
 	if info.Size() != descriptor.Size {
-		return "", fmt.Errorf("pack %s has size %d; manifest declares %d", descriptor.ID, info.Size(), descriptor.Size)
+		return "", fmt.Errorf("pack %s has size %d; manifest declares %d: %w", descriptor.ID, info.Size(), descriptor.Size, errPackUnavailable)
 	}
 	verify, err := os.Open(path)
 	if err != nil {
@@ -367,7 +399,7 @@ func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor)
 		return "", closeErr
 	}
 	if actual != descriptor.ID {
-		return "", fmt.Errorf("pack integrity check failed: expected %s, got %s", descriptor.ID, actual)
+		return "", fmt.Errorf("pack integrity check failed: expected %s, got %s: %w", descriptor.ID, actual, errPackUnavailable)
 	}
 	return path, nil
 }
@@ -403,6 +435,7 @@ func (p *packStore) flushOneLocked(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("publish CARv2 pack: %w", err)
 	}
 	p.server.stats.packUploads.Add(1)
+	p.listedPacks[pack.ID] = struct{}{}
 
 	manifestValue := p.manifestForPackLocked(pack, entries, selectedCAS)
 	manifestData, manifestID, err := encodeManifest(manifestValue)
@@ -632,14 +665,38 @@ func filterPending[T any](order []string, values map[string]T) []string {
 }
 
 func (p *packStore) discover(ctx context.Context) error {
-	keys, err := p.catalog.List(ctx, manifestKeyFor(p.keyPrefix, ""), p.maxManifests)
+	// Listing reads metadata only: unlike a download it does not extend an
+	// entry's lifetime. Manifests are listed first, so the pack listing below
+	// cannot miss a pack that a concurrent writer published before its
+	// manifest.
+	manifestKeys, truncated, err := p.catalog.List(ctx, manifestKeyFor(p.keyPrefix, ""), p.maxManifests)
 	if err != nil {
 		return err
 	}
-	p.server.stats.manifestsDiscovered.Add(uint64(len(keys)))
-	manifests := make(map[string]manifest, len(keys))
+	p.server.stats.manifestsDiscovered.Add(uint64(len(manifestKeys)))
+	if truncated {
+		p.server.stats.manifestDiscoveryTruncated.Store(true)
+		p.server.cfg.Logger.Printf(
+			"manifest discovery stopped at the max-manifests limit of %d; older manifests are treated as cache misses",
+			p.maxManifests)
+	}
+	// Packs are only witnessed, never read, during discovery. A truncated pack
+	// listing would look like eviction and suppress valid downloads, so it is
+	// bounded by the repository rather than by max-manifests.
+	packKeys, _, err := p.catalog.List(ctx, packKeyFor(p.keyPrefix, ""), cache.UnboundedListing)
+	if err != nil {
+		return err
+	}
+	for _, key := range packKeys {
+		if id, ok := parsePackKey(p.keyPrefix, key); ok {
+			p.listedPacks[id] = struct{}{}
+		}
+	}
+	p.packsListed = true
+	p.server.stats.packsDiscovered.Add(uint64(len(p.listedPacks)))
+	manifests := make(map[string]manifest, len(manifestKeys))
 	parents := make(map[string]struct{})
-	for _, key := range keys {
+	for _, key := range manifestKeys {
 		manifestID, ok := parseManifestKey(p.keyPrefix, key)
 		if !ok {
 			continue
@@ -724,6 +781,15 @@ func parseManifestKey(prefix, key string) (string, bool) {
 	}
 	id := key[len(head):]
 	return id, validCID(id)
+}
+
+func parsePackKey(prefix, key string) (string, bool) {
+	head := packKeyFor(prefix, "")
+	if len(key) <= len(head) || key[:len(head)] != head {
+		return "", false
+	}
+	id := key[len(head):]
+	return id, digestPattern.MatchString(id)
 }
 
 const rawCIDSectionOverheadBytes = 64
