@@ -5,7 +5,27 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
+
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+
+	remoteexecution "github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/execution/v2"
 )
+
+var (
+	treeRootField     = treeFieldNumber("root")
+	treeChildrenField = treeFieldNumber("children")
+)
+
+func treeFieldNumber(name protoreflect.Name) protowire.Number {
+	field := (&remoteexecution.Tree{}).ProtoReflect().Descriptor().Fields().ByName(name)
+	if field == nil {
+		panic("build.bazel.remote.execution.v2.Tree has no field " + string(name))
+	}
+	return protowire.Number(field.Number())
+}
 
 type parsedDirectory struct {
 	files       []digestReference
@@ -13,114 +33,58 @@ type parsedDirectory struct {
 }
 
 func parseDirectory(data []byte) (parsedDirectory, error) {
+	message := &remoteexecution.Directory{}
+	if err := proto.Unmarshal(data, message); err != nil {
+		return parsedDirectory{}, fmt.Errorf("directory: %w", err)
+	}
 	var directory parsedDirectory
-	err := visitWireFields(data, func(field wireField) error {
-		switch field.number {
-		case 1:
-			message, err := field.message("directory.files")
-			if err != nil {
-				return err
-			}
-			reference, err := parseNodeDigest(message, "file_node")
-			if err != nil {
-				return err
-			}
-			directory.files = append(directory.files, reference)
-		case 2:
-			message, err := field.message("directory.directories")
-			if err != nil {
-				return err
-			}
-			reference, err := parseNodeDigest(message, "directory_node")
-			if err != nil {
-				return err
-			}
-			directory.directories = append(directory.directories, reference)
-		}
-		return nil
-	})
-	return directory, err
-}
-
-func parseNodeDigest(data []byte, nodeName string) (digestReference, error) {
-	var digest *digestReference
-	err := visitWireFields(data, func(field wireField) error {
-		if field.number != 2 {
-			return nil
-		}
-		message, err := field.message(nodeName + ".digest")
+	for _, file := range message.GetFiles() {
+		reference, err := digestReferenceFrom(file.GetDigest(), "file_node.digest")
 		if err != nil {
-			return err
+			return parsedDirectory{}, err
 		}
-		reference, err := parseDigest(message)
+		directory.files = append(directory.files, reference)
+	}
+	for _, child := range message.GetDirectories() {
+		reference, err := digestReferenceFrom(child.GetDigest(), "directory_node.digest")
 		if err != nil {
-			return fmt.Errorf("%s.digest: %w", nodeName, err)
+			return parsedDirectory{}, err
 		}
-		if digest != nil {
-			return fmt.Errorf("%s.digest is repeated", nodeName)
-		}
-		digest = &reference
-		return nil
-	})
-	if err != nil {
-		return digestReference{}, err
+		directory.directories = append(directory.directories, reference)
 	}
-	if digest == nil {
-		return digestReference{}, fmt.Errorf("%s has no digest", nodeName)
-	}
-	return *digest, nil
+	return directory, nil
 }
 
 func parseTree(data []byte) ([]digestReference, error) {
-	var directories []parsedDirectory
-	childDigests := make(map[string]int64)
-	rootSeen := false
-
-	err := visitWireFields(data, func(field wireField) error {
-		if field.number != 1 && field.number != 2 {
-			return nil
-		}
-		message, err := field.message("tree.directory")
-		if err != nil {
-			return err
-		}
-		if field.number == 1 {
-			if rootSeen {
-				return errors.New("tree.root is repeated")
-			}
-			rootSeen = true
-		} else {
-			sum := sha256.Sum256(message)
-			hash := hex.EncodeToString(sum[:])
-			if existingSize, exists := childDigests[hash]; exists && existingSize != int64(len(message)) {
-				return fmt.Errorf("tree child %s has inconsistent sizes", hash)
-			}
-			childDigests[hash] = int64(len(message))
-		}
-		directory, err := parseDirectory(message)
-		if err != nil {
-			return fmt.Errorf("tree.directory: %w", err)
-		}
-		directories = append(directories, directory)
-		return nil
-	})
+	roots, children, err := splitTree(data)
 	if err != nil {
 		return nil, err
 	}
-	if !rootSeen {
+	if len(roots) == 0 {
 		return nil, errors.New("tree has no root directory")
+	}
+	if len(roots) > 1 {
+		return nil, errors.New("tree.root is repeated")
+	}
+	childDigests := make(map[string]int64, len(children))
+	for _, child := range children {
+		sum := sha256.Sum256(child)
+		childDigests[hex.EncodeToString(sum[:])] = int64(len(child))
 	}
 
 	files := newDigestCollection()
-	for _, directory := range directories {
+	for _, encoded := range slices.Concat(roots, children) {
+		directory, err := parseDirectory(encoded)
+		if err != nil {
+			return nil, fmt.Errorf("tree.directory: %w", err)
+		}
 		for _, file := range directory.files {
 			if err := files.add(file); err != nil {
 				return nil, err
 			}
 		}
 		for _, child := range directory.directories {
-			size, exists := childDigests[child.hash]
-			if !exists || size != child.size {
+			if size, exists := childDigests[child.hash]; !exists || size != child.size {
 				return nil, fmt.Errorf(
 					"tree references missing child directory %s/%d",
 					child.hash,
@@ -130,4 +94,38 @@ func parseTree(data []byte) ([]digestReference, error) {
 		}
 	}
 	return files.values, nil
+}
+
+// splitTree returns the encoded root and child Directory messages of a Tree. A
+// Directory digest covers the exact bytes its producer emitted, so the embedded
+// messages have to be hashed as received; re-encoding the decoded messages is not
+// guaranteed to reproduce those bytes.
+func splitTree(data []byte) (roots [][]byte, children [][]byte, err error) {
+	for len(data) > 0 {
+		number, wireType, consumed := protowire.ConsumeTag(data)
+		if consumed < 0 {
+			return nil, nil, protowire.ParseError(consumed)
+		}
+		data = data[consumed:]
+
+		if wireType == protowire.BytesType && (number == treeRootField || number == treeChildrenField) {
+			value, n := protowire.ConsumeBytes(data)
+			if n < 0 {
+				return nil, nil, protowire.ParseError(n)
+			}
+			if number == treeRootField {
+				roots = append(roots, value)
+			} else {
+				children = append(children, value)
+			}
+			consumed = n
+		} else {
+			consumed = protowire.ConsumeFieldValue(number, wireType, data)
+			if consumed < 0 {
+				return nil, nil, protowire.ParseError(consumed)
+			}
+		}
+		data = data[consumed:]
+	}
+	return roots, children, nil
 }

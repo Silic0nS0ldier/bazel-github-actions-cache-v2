@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
+
+	remoteexecution "github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/execution/v2"
 )
 
 func TestParseActionResultCollectsOnlyExternalCASReferences(t *testing.T) {
@@ -19,14 +21,16 @@ func TestParseActionResultCollectsOnlyExternalCASReferences(t *testing.T) {
 	stdout := referenceFor([]byte("inline stdout"))
 	stderr := referenceFor([]byte("external stderr"))
 
-	actionResult := concatProto(
-		bytesField(2, outputFileProto(direct, nil)),
-		bytesField(2, outputFileProto(inline, []byte("inline output"))),
-		bytesField(3, outputDirectoryProto(tree, root)),
-		bytesField(5, []byte("inline stdout")),
-		bytesField(6, digestProto(stdout)),
-		bytesField(8, digestProto(stderr)),
-	)
+	actionResult := marshalProto(t, remoteexecution.ActionResult_builder{
+		OutputFiles: []*remoteexecution.OutputFile{
+			outputFileProto(direct, nil),
+			outputFileProto(inline, []byte("inline output")),
+		},
+		OutputDirectories: []*remoteexecution.OutputDirectory{outputDirectoryProto(tree, root)},
+		StdoutRaw:         []byte("inline stdout"),
+		StdoutDigest:      digestProto(stdout),
+		StderrDigest:      digestProto(stderr),
+	}.Build())
 
 	references, err := parseActionResult(actionResult)
 	if err != nil {
@@ -38,11 +42,11 @@ func TestParseActionResultCollectsOnlyExternalCASReferences(t *testing.T) {
 }
 
 func TestParseActionResultRejectsMalformedDigest(t *testing.T) {
-	malformedDigest := concatProto(
-		bytesField(1, []byte(strings.Repeat("A", 64))),
-		varintField(2, 1),
-	)
-	actionResult := bytesField(2, bytesField(2, malformedDigest))
+	actionResult := marshalProto(t, remoteexecution.ActionResult_builder{
+		OutputFiles: []*remoteexecution.OutputFile{
+			outputFileProto(digestReference{hash: strings.Repeat("A", 64), size: 1}, nil),
+		},
+	}.Build())
 	if _, err := parseActionResult(actionResult); err == nil {
 		t.Fatal("uppercase digest was accepted")
 	}
@@ -51,13 +55,18 @@ func TestParseActionResultRejectsMalformedDigest(t *testing.T) {
 func TestParseTreeCollectsFilesAndRequiresEmbeddedChildren(t *testing.T) {
 	rootFile := referenceFor([]byte("root file"))
 	childFile := referenceFor([]byte("child file"))
-	child := bytesField(1, fileNodeProto(childFile))
-	childReference := referenceFor(child)
-	root := concatProto(
-		bytesField(1, fileNodeProto(rootFile)),
-		bytesField(2, directoryNodeProto(childReference)),
-	)
-	tree := concatProto(bytesField(1, root), bytesField(2, child))
+	child := remoteexecution.Directory_builder{
+		Files: []*remoteexecution.FileNode{fileNodeProto(childFile)},
+	}.Build()
+	childReference := referenceFor(marshalProto(t, child))
+	root := remoteexecution.Directory_builder{
+		Files:       []*remoteexecution.FileNode{fileNodeProto(rootFile)},
+		Directories: []*remoteexecution.DirectoryNode{directoryNodeProto(childReference)},
+	}.Build()
+	tree := marshalProto(t, remoteexecution.Tree_builder{
+		Root:     root,
+		Children: []*remoteexecution.Directory{child},
+	}.Build())
 
 	files, err := parseTree(tree)
 	if err != nil {
@@ -65,7 +74,8 @@ func TestParseTreeCollectsFilesAndRequiresEmbeddedChildren(t *testing.T) {
 	}
 	assertReferences(t, files, rootFile, childFile)
 
-	if _, err := parseTree(bytesField(1, root)); err == nil {
+	truncated := marshalProto(t, remoteexecution.Tree_builder{Root: root}.Build())
+	if _, err := parseTree(truncated); err == nil {
 		t.Fatal("Tree with a missing embedded child was accepted")
 	}
 }
@@ -73,7 +83,7 @@ func TestParseTreeCollectsFilesAndRequiresEmbeddedChildren(t *testing.T) {
 func TestActionResultReadRequiresCompleteCASClosure(t *testing.T) {
 	output := []byte("cached output")
 	outputReference := referenceFor(output)
-	actionResult := bytesField(2, outputFileProto(outputReference, nil))
+	actionResult := actionResultProto(t, outputReference)
 	actionDigest := strings.Repeat("a", 64)
 
 	t.Run("complete", func(t *testing.T) {
@@ -112,7 +122,9 @@ func TestActionResultReadRequiresCompleteCASClosure(t *testing.T) {
 
 func TestActionResultReadAllowsImplicitEmptyCASDigest(t *testing.T) {
 	emptyReference := referenceFor(nil)
-	actionResult := bytesField(6, digestProto(emptyReference))
+	actionResult := marshalProto(t, remoteexecution.ActionResult_builder{
+		StdoutDigest: digestProto(emptyReference),
+	}.Build())
 	actionDigest := strings.Repeat("1", 64)
 	backend := newMemoryBackend()
 	backend.objects["test-v1-ac-"+actionDigest] = actionResult
@@ -131,9 +143,17 @@ func TestActionResultReadAllowsImplicitEmptyCASDigest(t *testing.T) {
 
 func TestActionResultReadValidatesTreeFileClosure(t *testing.T) {
 	fileReference := referenceFor([]byte("missing nested file"))
-	tree := bytesField(1, bytesField(1, fileNodeProto(fileReference)))
+	tree := marshalProto(t, remoteexecution.Tree_builder{
+		Root: remoteexecution.Directory_builder{
+			Files: []*remoteexecution.FileNode{fileNodeProto(fileReference)},
+		}.Build(),
+	}.Build())
 	treeReference := referenceFor(tree)
-	actionResult := bytesField(3, outputDirectoryProto(treeReference, digestReference{}))
+	actionResult := marshalProto(t, remoteexecution.ActionResult_builder{
+		OutputDirectories: []*remoteexecution.OutputDirectory{
+			outputDirectoryProto(treeReference, digestReference{}),
+		},
+	}.Build())
 	actionDigest := strings.Repeat("b", 64)
 
 	backend := newMemoryBackend()
@@ -154,11 +174,19 @@ func TestActionResultReadValidatesTreeFileClosure(t *testing.T) {
 func TestActionResultReadValidatesRootDirectoryClosure(t *testing.T) {
 	file := []byte("nested output")
 	fileReference := referenceFor(file)
-	child := bytesField(1, fileNodeProto(fileReference))
+	child := marshalProto(t, remoteexecution.Directory_builder{
+		Files: []*remoteexecution.FileNode{fileNodeProto(fileReference)},
+	}.Build())
 	childReference := referenceFor(child)
-	root := bytesField(2, directoryNodeProto(childReference))
+	root := marshalProto(t, remoteexecution.Directory_builder{
+		Directories: []*remoteexecution.DirectoryNode{directoryNodeProto(childReference)},
+	}.Build())
 	rootReference := referenceFor(root)
-	actionResult := bytesField(3, outputDirectoryProto(digestReference{}, rootReference))
+	actionResult := marshalProto(t, remoteexecution.ActionResult_builder{
+		OutputDirectories: []*remoteexecution.OutputDirectory{
+			outputDirectoryProto(digestReference{}, rootReference),
+		},
+	}.Build())
 	actionDigest := strings.Repeat("e", 64)
 
 	t.Run("complete", func(t *testing.T) {
@@ -216,7 +244,7 @@ func TestActionResultReadRejectsInvalidPayload(t *testing.T) {
 
 func TestActionResultReadHandlesExistenceCheckErrors(t *testing.T) {
 	outputReference := referenceFor([]byte("output"))
-	actionResult := bytesField(2, outputFileProto(outputReference, nil))
+	actionResult := actionResultProto(t, outputReference)
 	actionDigest := strings.Repeat("f", 64)
 
 	for _, test := range []struct {
@@ -252,7 +280,7 @@ func TestActionResultReadHandlesExistenceCheckErrors(t *testing.T) {
 func TestActionResultUploadPublishesOnlyCompleteCASClosure(t *testing.T) {
 	output := []byte("persisted output")
 	outputReference := referenceFor(output)
-	actionResult := bytesField(2, outputFileProto(outputReference, nil))
+	actionResult := actionResultProto(t, outputReference)
 	actionDigest := strings.Repeat("d", 64)
 
 	t.Run("complete", func(t *testing.T) {
@@ -295,7 +323,9 @@ func TestActionResultUploadPublishesOnlyCompleteCASClosure(t *testing.T) {
 
 func TestActionResultUploadAllowsImplicitEmptyCASDigest(t *testing.T) {
 	emptyReference := referenceFor(nil)
-	actionResult := bytesField(8, digestProto(emptyReference))
+	actionResult := marshalProto(t, remoteexecution.ActionResult_builder{
+		StderrDigest: digestProto(emptyReference),
+	}.Build())
 	actionDigest := strings.Repeat("2", 64)
 	backend := newMemoryBackend()
 	server := testServer(t, backend, nil)
@@ -340,56 +370,55 @@ func referenceFor(data []byte) digestReference {
 	return digestReference{hash: digest(data), size: int64(len(data))}
 }
 
-func digestProto(reference digestReference) []byte {
-	return concatProto(
-		bytesField(1, []byte(reference.hash)),
-		varintField(2, uint64(reference.size)),
-	)
+func digestProto(reference digestReference) *remoteexecution.Digest {
+	return remoteexecution.Digest_builder{
+		Hash:      reference.hash,
+		SizeBytes: reference.size,
+	}.Build()
 }
 
-func outputFileProto(reference digestReference, inline []byte) []byte {
-	message := bytesField(2, digestProto(reference))
-	if inline != nil {
-		message = append(message, bytesField(5, inline)...)
-	}
-	return message
+func outputFileProto(reference digestReference, inline []byte) *remoteexecution.OutputFile {
+	return remoteexecution.OutputFile_builder{
+		Digest:   digestProto(reference),
+		Contents: inline,
+	}.Build()
 }
 
-func outputDirectoryProto(tree, root digestReference) []byte {
-	var message []byte
+func outputDirectoryProto(tree, root digestReference) *remoteexecution.OutputDirectory {
+	message := remoteexecution.OutputDirectory_builder{}
 	if tree.hash != "" {
-		message = append(message, bytesField(3, digestProto(tree))...)
+		message.TreeDigest = digestProto(tree)
 	}
 	if root.hash != "" {
-		message = append(message, bytesField(5, digestProto(root))...)
+		message.RootDirectoryDigest = digestProto(root)
 	}
-	return message
+	return message.Build()
 }
 
-func fileNodeProto(reference digestReference) []byte {
-	return bytesField(2, digestProto(reference))
+func fileNodeProto(reference digestReference) *remoteexecution.FileNode {
+	return remoteexecution.FileNode_builder{Digest: digestProto(reference)}.Build()
 }
 
-func directoryNodeProto(reference digestReference) []byte {
-	return bytesField(2, digestProto(reference))
+func directoryNodeProto(reference digestReference) *remoteexecution.DirectoryNode {
+	return remoteexecution.DirectoryNode_builder{Digest: digestProto(reference)}.Build()
 }
 
-func bytesField(number protowire.Number, value []byte) []byte {
-	message := protowire.AppendTag(nil, number, protowire.BytesType)
-	return protowire.AppendBytes(message, value)
+// actionResultProto builds the minimal action result that references a single CAS
+// blob, which is the fixture most cache-level tests need.
+func actionResultProto(t *testing.T, output digestReference) []byte {
+	t.Helper()
+	return marshalProto(t, remoteexecution.ActionResult_builder{
+		OutputFiles: []*remoteexecution.OutputFile{outputFileProto(output, nil)},
+	}.Build())
 }
 
-func varintField(number protowire.Number, value uint64) []byte {
-	message := protowire.AppendTag(nil, number, protowire.VarintType)
-	return protowire.AppendVarint(message, value)
-}
-
-func concatProto(fields ...[]byte) []byte {
-	var message []byte
-	for _, field := range fields {
-		message = append(message, field...)
+func marshalProto(t *testing.T, message proto.Message) []byte {
+	t.Helper()
+	encoded, err := proto.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return message
+	return encoded
 }
 
 func assertReferences(t *testing.T, got []digestReference, want ...digestReference) {

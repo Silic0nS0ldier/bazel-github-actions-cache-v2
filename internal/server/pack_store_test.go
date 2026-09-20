@@ -83,7 +83,7 @@ func TestPackedStoreRoundTripCommitsPackBeforeManifest(t *testing.T) {
 	seed := testPackedServer(t, backend)
 	output := []byte("packed output")
 	outputReference := referenceFor(output)
-	actionResult := bytesField(2, outputFileProto(outputReference, nil))
+	actionResult := actionResultProto(t, outputReference)
 	actionDigest := digest([]byte("packed action"))
 	if response := putCacheObject(seed, "/cas/"+outputReference.hash, output); response.Code != http.StatusNoContent {
 		t.Fatalf("CAS PUT = %d", response.Code)
@@ -432,7 +432,7 @@ func seedPackedClosure(t *testing.T, backend *memoryBackend, output []byte, acti
 	}
 
 	actionWriter := testPackedServer(t, backend)
-	if response := putCacheObject(actionWriter, "/ac/"+actionDigest, bytesField(2, outputFileProto(reference, nil))); response.Code != http.StatusNoContent {
+	if response := putCacheObject(actionWriter, "/ac/"+actionDigest, actionResultProto(t, reference)); response.Code != http.StatusNoContent {
 		t.Fatalf("AC PUT = %d", response.Code)
 	}
 	closePackedServer(t, actionWriter)
