@@ -315,6 +315,13 @@ validated before use.
 The repository pins Go in `.go-version` and pins `go-actions-cache` to a full
 upstream commit through a Go pseudo-version.
 
+REAPI messages are decoded with generated protobuf code (the opaque API of
+`google.golang.org/protobuf`). The upstream `.proto` sources are vendored under
+`proto/` and the generated Go code is committed under `internal/proto/gen`, so
+the commands below need neither `buf` nor `protoc`. Run
+`scripts/generate-proto.sh` after changing the vendored definitions or the
+pinned generator versions.
+
 ```bash
 go test -race ./...
 go vet ./...

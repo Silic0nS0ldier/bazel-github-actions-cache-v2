@@ -3,6 +3,10 @@ package server
 import (
 	"errors"
 	"fmt"
+
+	"google.golang.org/protobuf/proto"
+
+	remoteexecution "github.com/cre4ture/bazel-github-actions-cache-v2/internal/proto/gen/build/bazel/remote/execution/v2"
 )
 
 const maxActionResultObjects = 100_000
@@ -53,164 +57,98 @@ func newActionResultReferences() actionResultReferences {
 }
 
 func parseActionResult(data []byte) (actionResultReferences, error) {
-	references := newActionResultReferences()
-	var stdoutDigest *digestReference
-	var stderrDigest *digestReference
-	var stdoutInline bool
-	var stderrInline bool
+	message := &remoteexecution.ActionResult{}
+	if err := proto.Unmarshal(data, message); err != nil {
+		return actionResultReferences{}, fmt.Errorf("action_result: %w", err)
+	}
 
-	err := visitWireFields(data, func(field wireField) error {
-		switch field.number {
-		case 2:
-			message, err := field.message("action_result.output_files")
-			if err != nil {
-				return err
+	references := newActionResultReferences()
+	for _, file := range message.GetOutputFiles() {
+		if !file.HasDigest() {
+			if len(file.GetContents()) == 0 {
+				return actionResultReferences{}, errors.New(
+					"output_file has neither digest nor inline contents",
+				)
 			}
-			digest, inline, err := parseOutputFile(message)
-			if err != nil {
-				return err
-			}
-			if digest != nil && !inline {
-				return references.blobs.add(*digest)
-			}
-		case 3:
-			message, err := field.message("action_result.output_directories")
-			if err != nil {
-				return err
-			}
-			tree, root, err := parseOutputDirectory(message)
-			if err != nil {
-				return err
-			}
-			if tree != nil {
-				if err := references.trees.add(*tree); err != nil {
-					return err
-				}
-			}
-			if root != nil {
-				if err := references.directories.add(*root); err != nil {
-					return err
-				}
-			}
-		case 5:
-			if _, err := field.message("action_result.stdout_raw"); err != nil {
-				return err
-			}
-			stdoutInline = true
-		case 6:
-			message, err := field.message("action_result.stdout_digest")
-			if err != nil {
-				return err
-			}
-			reference, err := parseDigest(message)
-			if err != nil {
-				return fmt.Errorf("action_result.stdout_digest: %w", err)
-			}
-			stdoutDigest = &reference
-		case 7:
-			if _, err := field.message("action_result.stderr_raw"); err != nil {
-				return err
-			}
-			stderrInline = true
-		case 8:
-			message, err := field.message("action_result.stderr_digest")
-			if err != nil {
-				return err
-			}
-			reference, err := parseDigest(message)
-			if err != nil {
-				return fmt.Errorf("action_result.stderr_digest: %w", err)
-			}
-			stderrDigest = &reference
+			continue
 		}
-		return nil
-	})
-	if err != nil {
+		reference, err := digestReferenceFrom(file.GetDigest(), "output_file.digest")
+		if err != nil {
+			return actionResultReferences{}, err
+		}
+		// Inlined contents travel with the action result, so they are not part of
+		// the CAS closure even though the digest is still declared.
+		if len(file.GetContents()) > 0 {
+			continue
+		}
+		if err := references.blobs.add(reference); err != nil {
+			return actionResultReferences{}, err
+		}
+	}
+
+	for _, directory := range message.GetOutputDirectories() {
+		if !directory.HasTreeDigest() && !directory.HasRootDirectoryDigest() {
+			return actionResultReferences{}, errors.New(
+				"output_directory has no tree or root directory digest",
+			)
+		}
+		if err := addOutputDigest(
+			&references.trees,
+			directory.GetTreeDigest(),
+			"output_directory.tree_digest",
+		); err != nil {
+			return actionResultReferences{}, err
+		}
+		if err := addOutputDigest(
+			&references.directories,
+			directory.GetRootDirectoryDigest(),
+			"output_directory.root_directory_digest",
+		); err != nil {
+			return actionResultReferences{}, err
+		}
+	}
+
+	addStream := func(digest *remoteexecution.Digest, inline []byte, name string) error {
+		if digest == nil {
+			return nil
+		}
+		reference, err := digestReferenceFrom(digest, name)
+		if err != nil {
+			return err
+		}
+		if len(inline) > 0 {
+			return nil
+		}
+		return references.blobs.add(reference)
+	}
+	if err := addStream(
+		message.GetStdoutDigest(),
+		message.GetStdoutRaw(),
+		"action_result.stdout_digest",
+	); err != nil {
 		return actionResultReferences{}, err
 	}
-	if stdoutDigest != nil && !stdoutInline {
-		if err := references.blobs.add(*stdoutDigest); err != nil {
-			return actionResultReferences{}, err
-		}
-	}
-	if stderrDigest != nil && !stderrInline {
-		if err := references.blobs.add(*stderrDigest); err != nil {
-			return actionResultReferences{}, err
-		}
+	if err := addStream(
+		message.GetStderrDigest(),
+		message.GetStderrRaw(),
+		"action_result.stderr_digest",
+	); err != nil {
+		return actionResultReferences{}, err
 	}
 	return references, nil
 }
 
-func parseOutputFile(data []byte) (*digestReference, bool, error) {
-	var digest *digestReference
-	var contentsInline bool
-	err := visitWireFields(data, func(field wireField) error {
-		switch field.number {
-		case 2:
-			message, err := field.message("output_file.digest")
-			if err != nil {
-				return err
-			}
-			reference, err := parseDigest(message)
-			if err != nil {
-				return fmt.Errorf("output_file.digest: %w", err)
-			}
-			if digest != nil {
-				return errors.New("output_file.digest is repeated")
-			}
-			digest = &reference
-		case 5:
-			if _, err := field.message("output_file.contents"); err != nil {
-				return err
-			}
-			contentsInline = true
-		}
+func addOutputDigest(
+	collection *digestCollection,
+	digest *remoteexecution.Digest,
+	name string,
+) error {
+	if digest == nil {
 		return nil
-	})
+	}
+	reference, err := digestReferenceFrom(digest, name)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
-	if digest == nil && !contentsInline {
-		return nil, false, errors.New("output_file has neither digest nor inline contents")
-	}
-	return digest, contentsInline, nil
-}
-
-func parseOutputDirectory(data []byte) (*digestReference, *digestReference, error) {
-	var tree *digestReference
-	var root *digestReference
-	err := visitWireFields(data, func(field wireField) error {
-		var destination **digestReference
-		var name string
-		switch field.number {
-		case 3:
-			destination = &tree
-			name = "output_directory.tree_digest"
-		case 5:
-			destination = &root
-			name = "output_directory.root_directory_digest"
-		default:
-			return nil
-		}
-		message, err := field.message(name)
-		if err != nil {
-			return err
-		}
-		reference, err := parseDigest(message)
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		if *destination != nil {
-			return fmt.Errorf("%s is repeated", name)
-		}
-		*destination = &reference
-		return nil
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	if tree == nil && root == nil {
-		return nil, nil, errors.New("output_directory has no tree or root directory digest")
-	}
-	return tree, root, nil
+	return collection.add(reference)
 }
