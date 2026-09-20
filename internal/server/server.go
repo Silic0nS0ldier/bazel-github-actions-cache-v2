@@ -29,6 +29,10 @@ var (
 	jwtPattern    = regexp.MustCompile(`[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}`)
 )
 
+// defaultPackRenewInterval batches retention renewals long enough that a pack
+// Bazel downloads shortly after a presence check costs no extra API call.
+const defaultPackRenewInterval = 15 * time.Second
+
 type Config struct {
 	Backend           cache.Backend
 	Catalog           cache.Catalog
@@ -37,6 +41,7 @@ type Config struct {
 	StorageMode       string
 	PackSize          int64
 	PackFlushInterval time.Duration
+	PackRenewInterval time.Duration
 	MaxManifests      int
 	WriteEnabled      bool
 	FailOpen          bool
@@ -109,6 +114,9 @@ func New(cfg Config) (*Server, error) {
 		}
 		if cfg.PackFlushInterval <= 0 {
 			return nil, errors.New("pack flush interval must be positive")
+		}
+		if cfg.PackRenewInterval <= 0 {
+			cfg.PackRenewInterval = defaultPackRenewInterval
 		}
 		if cfg.MaxManifests <= 0 {
 			return nil, errors.New("maximum manifests must be positive")
@@ -199,7 +207,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	key := s.cfg.KeyPrefix + "-" + kind + "-" + digest
 	switch r.Method {
-	case http.MethodHead, http.MethodGet:
+	case http.MethodHead:
+		s.handleHead(w, r, key, kind, digest)
+	case http.MethodGet:
 		s.handleRead(w, r, key, kind, digest)
 	case http.MethodPut:
 		s.handlePut(w, r, key, kind, digest)
@@ -207,6 +217,30 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "GET, HEAD, PUT")
 		s.reject(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleHead answers a packed CAS presence check from the manifest view.
+// Bazel issues these while building without the bytes, so restoring a whole
+// pack to answer one would defeat the point.
+func (s *Server) handleHead(w http.ResponseWriter, r *http.Request, key, kind, digest string) {
+	if s.packs == nil || kind != "cas" {
+		s.handleRead(w, r, key, kind, digest)
+		return
+	}
+	size, found, err := s.presence(r.Context(), key)
+	if err != nil || !found {
+		if err != nil {
+			s.cfg.Logger.Printf("presence check for cas/%s failed: %s", digest, safeError(err))
+		}
+		s.stats.misses.Add(1)
+		http.NotFound(w, r)
+		return
+	}
+	s.stats.hits.Add(1)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleImplicitEmptyCASRead(w http.ResponseWriter, r *http.Request) {
@@ -401,21 +435,26 @@ func (s *Server) resolve(ctx context.Context, key, kind, digest string) (object,
 	return obj, true, nil
 }
 
-func (s *Server) exists(ctx context.Context, key string) (bool, error) {
+// presence reports whether a CAS object can be served, and its recorded size
+// when the storage mode knows that without a download. Packed mode answers
+// from the manifest view and renews the holding pack's retention.
+func (s *Server) presence(ctx context.Context, key string) (int64, bool, error) {
 	s.objectsMu.RLock()
-	_, ok := s.objects[key]
+	object, ok := s.objects[key]
 	s.objectsMu.RUnlock()
 	if ok {
-		return true, nil
+		return object.size, true, nil
 	}
 	if s.packs != nil {
 		prefix := s.cfg.KeyPrefix + "-cas-"
 		if !strings.HasPrefix(key, prefix) || len(key) != len(prefix)+64 {
-			return false, errors.New("packed storage can only resolve CAS keys")
+			return 0, false, errors.New("packed storage can only resolve CAS keys")
 		}
-		return s.packs.exists(ctx, key[len(prefix):])
+		size, found := s.packs.presence(key[len(prefix):])
+		return size, found, nil
 	}
-	return s.backendExists(ctx, key)
+	found, err := s.backendExists(ctx, key)
+	return -1, found, err
 }
 
 func (s *Server) backendExists(ctx context.Context, key string) (bool, error) {

@@ -43,6 +43,7 @@ func run() error {
 		storageMode      = flag.String("storage-mode", "objects", "storage mode: objects or packs")
 		packSize         = flag.Int64("pack-size", 8*1024*1024, "target CARv2 pack size in bytes")
 		packFlush        = flag.Duration("pack-flush-interval", 30*time.Second, "maximum delay before flushing pending CARv2 data")
+		packRenew        = flag.Duration("pack-renew-interval", 15*time.Second, "delay before renewing retention for packs that only presence checks touched")
 		maxManifests     = flag.Int("max-manifests", 2048, "maximum manifests to read during discovery; any beyond this are ignored")
 		writeEnabled     = flag.Bool("write-enabled", false, "publish validated uploads")
 		failOpen         = flag.Bool("fail-open", true, "degrade backend errors to misses/success")
@@ -104,6 +105,7 @@ func run() error {
 		StorageMode:       *storageMode,
 		PackSize:          *packSize,
 		PackFlushInterval: *packFlush,
+		PackRenewInterval: *packRenew,
 		MaxManifests:      *maxManifests,
 		WriteEnabled:      *writeEnabled,
 		FailOpen:          *failOpen,

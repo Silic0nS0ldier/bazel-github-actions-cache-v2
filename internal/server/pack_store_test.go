@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -338,6 +339,149 @@ func TestPackedStoreDoesNotSpendTheManifestLimitOnOrphans(t *testing.T) {
 	}
 	if response := readCacheObject(restore, "/cas/"+digest([]byte("one"))); response.Code != http.StatusNotFound {
 		t.Fatalf("orphaned mapping = %d", response.Code)
+	}
+}
+
+func TestPackedStorePresenceCheckRenewsPackWithoutDownloadingIt(t *testing.T) {
+	backend := newMemoryBackend()
+	seed := testPackedServer(t, backend)
+	payloads := [][]byte{[]byte("presence one"), []byte("presence two")}
+	for _, body := range payloads {
+		if response := putCacheObject(seed, "/cas/"+digest(body), body); response.Code != http.StatusNoContent {
+			t.Fatalf("CAS PUT = %d", response.Code)
+		}
+	}
+	closePackedServer(t, seed)
+
+	restore := testPackedServer(t, backend)
+	loadsAfterDiscovery := backend.loadCount()
+	for _, body := range payloads {
+		response := headCacheObject(restore, "/cas/"+digest(body))
+		if response.Code != http.StatusOK {
+			t.Fatalf("HEAD = %d", response.Code)
+		}
+		if got := response.Header().Get("Content-Length"); got != strconv.Itoa(len(body)) {
+			t.Fatalf("Content-Length = %q", got)
+		}
+		if response.Body.Len() != 0 {
+			t.Fatal("HEAD returned a body")
+		}
+	}
+	if backend.loadCount() != loadsAfterDiscovery {
+		t.Fatal("a presence check restored the pack")
+	}
+	if backend.existsCount() != 0 {
+		t.Fatal("renewal was issued immediately instead of being batched")
+	}
+
+	closePackedServer(t, restore)
+	if backend.existsCount() != 1 {
+		t.Fatalf("expected one renewal for the shared pack, got %d", backend.existsCount())
+	}
+	if stats := restore.Snapshot(); stats.PackRenewals != 1 || stats.PackDownloads != 0 {
+		t.Fatalf("unexpected renewal stats: %+v", stats)
+	}
+}
+
+func TestPackedStoreSkipsRenewalWhenThePackIsDownloaded(t *testing.T) {
+	backend := newMemoryBackend()
+	seed := testPackedServer(t, backend)
+	body := []byte("downloaded soon after")
+	if response := putCacheObject(seed, "/cas/"+digest(body), body); response.Code != http.StatusNoContent {
+		t.Fatalf("CAS PUT = %d", response.Code)
+	}
+	closePackedServer(t, seed)
+
+	restore := testPackedServer(t, backend)
+	if response := headCacheObject(restore, "/cas/"+digest(body)); response.Code != http.StatusOK {
+		t.Fatalf("HEAD = %d", response.Code)
+	}
+	if response := readCacheObject(restore, "/cas/"+digest(body)); response.Code != http.StatusOK {
+		t.Fatalf("GET = %d", response.Code)
+	}
+	closePackedServer(t, restore)
+	if backend.existsCount() != 0 {
+		t.Fatalf("the download should have covered the renewal, got %d calls", backend.existsCount())
+	}
+	if stats := restore.Snapshot(); stats.PackRenewals != 0 || stats.PackDownloads != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+// seedPackedClosure publishes an output blob and then, in a separate job, an
+// action result referencing it, so the two land in different packs.
+func seedPackedClosure(t *testing.T, backend *memoryBackend, output []byte, actionDigest string) string {
+	t.Helper()
+	reference := referenceFor(output)
+	blobWriter := testPackedServer(t, backend)
+	if response := putCacheObject(blobWriter, "/cas/"+reference.hash, output); response.Code != http.StatusNoContent {
+		t.Fatalf("CAS PUT = %d", response.Code)
+	}
+	closePackedServer(t, blobWriter)
+	var blobPackKey string
+	backend.mu.Lock()
+	for key := range backend.objects {
+		if strings.Contains(key, "-car-pack-v1-") {
+			blobPackKey = key
+		}
+	}
+	backend.mu.Unlock()
+	if blobPackKey == "" {
+		t.Fatal("no pack was published for the output")
+	}
+
+	actionWriter := testPackedServer(t, backend)
+	if response := putCacheObject(actionWriter, "/ac/"+actionDigest, bytesField(2, outputFileProto(reference, nil))); response.Code != http.StatusNoContent {
+		t.Fatalf("AC PUT = %d", response.Code)
+	}
+	closePackedServer(t, actionWriter)
+	return blobPackKey
+}
+
+func TestPackedStoreRefusesActionResultWithAnEvictedOutputPack(t *testing.T) {
+	backend := newMemoryBackend()
+	actionDigest := digest([]byte("action with evicted output"))
+	blobPackKey := seedPackedClosure(t, backend, []byte("evicted output"), actionDigest)
+
+	backend.mu.Lock()
+	delete(backend.objects, blobPackKey)
+	backend.mu.Unlock()
+
+	restore := testPackedServer(t, backend)
+	defer closePackedServer(t, restore)
+	if response := readCacheObject(restore, "/ac/"+actionDigest); response.Code != http.StatusNotFound {
+		t.Fatalf("action result with an evicted output = %d", response.Code)
+	}
+	if stats := restore.Snapshot(); stats.IncompleteActionResults != 1 {
+		t.Fatalf("closure was not checked before serving: %+v", stats)
+	}
+}
+
+func TestPackedStoreActionResultHitRenewsItsClosurePacks(t *testing.T) {
+	backend := newMemoryBackend()
+	actionDigest := digest([]byte("action with a remote output"))
+	seedPackedClosure(t, backend, []byte("output kept in another pack"), actionDigest)
+	// The publishing job presence-checks the output too, so count from here.
+	renewalsAfterSeeding := backend.existsCount()
+
+	restore := testPackedServer(t, backend)
+	if response := readCacheObject(restore, "/ac/"+actionDigest); response.Code != http.StatusOK {
+		t.Fatalf("AC GET = %d", response.Code)
+	}
+	stats := restore.Snapshot()
+	if stats.PackDownloads != 1 || stats.ValidatedActionResults != 1 {
+		t.Fatalf("serving an action result should restore only its own pack: %+v", stats)
+	}
+	if backend.existsCount() != renewalsAfterSeeding {
+		t.Fatal("renewal was issued immediately instead of being batched")
+	}
+
+	closePackedServer(t, restore)
+	if backend.existsCount() != renewalsAfterSeeding+1 {
+		t.Fatalf("the closure pack was not renewed, got %d calls", backend.existsCount()-renewalsAfterSeeding)
+	}
+	if stats := restore.Snapshot(); stats.PackRenewals != 1 {
+		t.Fatalf("unexpected renewal stats: %+v", stats)
 	}
 }
 

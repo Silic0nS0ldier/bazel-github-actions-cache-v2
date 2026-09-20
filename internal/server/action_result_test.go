@@ -322,6 +322,13 @@ func readCacheObject(server *Server, path string) *httptest.ResponseRecorder {
 	return response
 }
 
+func headCacheObject(server *Server, path string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodHead, path, nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
+}
+
 func putCacheObject(server *Server, path string, body []byte) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(body))
 	response := httptest.NewRecorder()

@@ -96,12 +96,23 @@ func (v *actionResultValidator) validateBlob(reference digestReference) error {
 	}
 	v.collect(reference)
 	key := v.server.cfg.KeyPrefix + "-cas-" + reference.hash
-	found, err := v.casExists(key)
+	size, found, err := v.casPresence(key)
 	if err != nil {
 		return err
 	}
 	if !found {
 		return missingCASObject(reference)
+	}
+	// A recorded size that disagrees with the action result means the entry is
+	// not the blob this action claims to have produced.
+	if size >= 0 && size != reference.size {
+		return fmt.Errorf(
+			"%w: CAS object %s has size %d; action result declares %d",
+			errInvalidActionResult,
+			reference.hash,
+			size,
+			reference.size,
+		)
 	}
 	return nil
 }
@@ -205,11 +216,15 @@ func (v *actionResultValidator) loadCAS(reference digestReference) (object, erro
 	return cachedObject, nil
 }
 
-func (v *actionResultValidator) casExists(key string) (bool, error) {
+// casPresence reports availability without downloading where the storage mode
+// allows it, and the recorded object size when it is known. Publication still
+// demands a persisted entry.
+func (v *actionResultValidator) casPresence(key string) (int64, bool, error) {
 	if v.requirePersisted {
-		return v.server.backendExists(v.context, key)
+		found, err := v.server.backendExists(v.context, key)
+		return -1, found, err
 	}
-	return v.server.exists(v.context, key)
+	return v.server.presence(v.context, key)
 }
 
 func (v *actionResultValidator) reserveObject() error {

@@ -30,6 +30,7 @@ type packStore struct {
 	keyPrefix     string
 	targetSize    int64
 	flushInterval time.Duration
+	renewInterval time.Duration
 	maxManifests  int
 
 	mu              sync.Mutex
@@ -48,8 +49,11 @@ type packStore struct {
 	listedPacks     map[string]struct{}
 	packsListed     bool
 	missingPacks    map[string]struct{}
+	pendingRenewals map[string]struct{}
+	renewedPacks    map[string]struct{}
 
 	flushRequests chan struct{}
+	renewRequests chan struct{}
 	stop          chan struct{}
 	closeOnce     sync.Once
 	workers       sync.WaitGroup
@@ -82,6 +86,7 @@ func newPackStore(server *Server) (*packStore, error) {
 		keyPrefix:       server.cfg.KeyPrefix,
 		targetSize:      server.cfg.PackSize,
 		flushInterval:   server.cfg.PackFlushInterval,
+		renewInterval:   server.cfg.PackRenewInterval,
 		maxManifests:    server.cfg.MaxManifests,
 		packs:           make(map[string]packDescriptor),
 		cas:             make(map[string]manifestObject),
@@ -94,7 +99,10 @@ func newPackStore(server *Server) (*packStore, error) {
 		loadingPacks:    make(map[string]*packLoad),
 		listedPacks:     make(map[string]struct{}),
 		missingPacks:    make(map[string]struct{}),
+		pendingRenewals: make(map[string]struct{}),
+		renewedPacks:    make(map[string]struct{}),
 		flushRequests:   make(chan struct{}, 1),
+		renewRequests:   make(chan struct{}, 1),
 		stop:            make(chan struct{}),
 	}
 	context, cancel := context.WithTimeout(context.Background(), server.cfg.BackendTimeout)
@@ -109,6 +117,8 @@ func newPackStore(server *Server) (*packStore, error) {
 	}
 	packs.workers.Add(1)
 	go packs.flushWorker()
+	packs.workers.Add(1)
+	go packs.renewWorker()
 	return packs, nil
 }
 
@@ -135,7 +145,9 @@ func (p *packStore) flushWorker() {
 func (p *packStore) close(ctx context.Context) error {
 	p.closeOnce.Do(func() { close(p.stop) })
 	p.workers.Wait()
-	return p.flush(ctx, true)
+	err := p.flush(ctx, true)
+	p.renewPending(ctx)
+	return err
 }
 
 func (p *packStore) stageCAS(digest string, value object) {
@@ -255,9 +267,118 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 	return value, true, nil
 }
 
-func (p *packStore) exists(ctx context.Context, digest string) (bool, error) {
-	_, found, err := p.resolve(ctx, p.keyPrefix+"-cas-"+digest, "cas", digest)
-	return found, err
+// presence answers a CAS presence check from the manifest view alone, without
+// restoring the pack, and schedules a retention renewal for it.
+func (p *packStore) presence(digest string) (int64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entry, found := p.cas[digest]
+	if !found {
+		return 0, false
+	}
+	if !p.packRestorableLocked(entry.PackID) {
+		return 0, false
+	}
+	p.scheduleRenewalLocked(entry.PackID)
+	return entry.Size, true
+}
+
+// packRestorableLocked reports whether a pack is still believed to be
+// restorable, using only what discovery and earlier downloads already proved.
+func (p *packStore) packRestorableLocked(packID string) bool {
+	if _, loaded := p.loadedPacks[packID]; loaded {
+		return true
+	}
+	if _, missing := p.missingPacks[packID]; missing {
+		return false
+	}
+	if _, known := p.packs[packID]; !known {
+		return false
+	}
+	if _, listed := p.listedPacks[packID]; p.packsListed && !listed {
+		return false
+	}
+	return true
+}
+
+// scheduleRenewalLocked queues one renewal per pack per job. Reading an entry
+// is what resets its GitHub retention, so a pack that only ever answers
+// presence checks would otherwise be evicted while Bazel still depends on it.
+func (p *packStore) scheduleRenewalLocked(packID string) {
+	if _, renewed := p.renewedPacks[packID]; renewed {
+		return
+	}
+	if _, loaded := p.loadedPacks[packID]; loaded {
+		return
+	}
+	if _, pending := p.pendingRenewals[packID]; pending {
+		return
+	}
+	p.pendingRenewals[packID] = struct{}{}
+	select {
+	case p.renewRequests <- struct{}{}:
+	default:
+	}
+}
+
+func (p *packStore) renewWorker() {
+	defer p.workers.Done()
+	for {
+		select {
+		case <-p.stop:
+			return
+		case <-p.renewRequests:
+		}
+		// Hold the batch briefly: a pack Bazel downloads within the window is
+		// renewed by that download, which saves the API call entirely.
+		timer := time.NewTimer(p.renewInterval)
+		select {
+		case <-p.stop:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		context, cancel := context.WithTimeout(context.Background(), p.server.cfg.BackendTimeout)
+		p.renewPending(context)
+		cancel()
+	}
+}
+
+// renewPending touches each queued pack once. The touch resolves cache
+// metadata without transferring the pack, and doubles as a liveness probe.
+func (p *packStore) renewPending(ctx context.Context) {
+	p.mu.Lock()
+	renewals := make([]packDescriptor, 0, len(p.pendingRenewals))
+	for packID := range p.pendingRenewals {
+		delete(p.pendingRenewals, packID)
+		if _, renewed := p.renewedPacks[packID]; renewed {
+			continue
+		}
+		descriptor, known := p.packs[packID]
+		if !known {
+			continue
+		}
+		// Marked before the call so a failing pack is not retried all job.
+		p.renewedPacks[packID] = struct{}{}
+		renewals = append(renewals, descriptor)
+	}
+	p.mu.Unlock()
+
+	for _, descriptor := range renewals {
+		found, err := p.server.backendExists(ctx, descriptor.Key)
+		if err != nil {
+			p.server.cfg.Logger.Printf("renewing pack %s failed: %s", descriptor.ID, safeError(err))
+			continue
+		}
+		if !found {
+			p.mu.Lock()
+			p.missingPacks[descriptor.ID] = struct{}{}
+			p.mu.Unlock()
+			p.server.cfg.Logger.Printf("pack %s vanished before renewal; its entries are cache misses", descriptor.ID)
+			continue
+		}
+		p.server.stats.packRenewals.Add(1)
+	}
 }
 
 func (p *packStore) materialize(key string, data []byte) (object, error) {
@@ -342,6 +463,9 @@ func (p *packStore) loadPack(ctx context.Context, packID string) (string, error)
 	if err == nil {
 		p.loadedPacks[packID] = path
 		loading.path = path
+		// The download already reset this entry's retention.
+		p.renewedPacks[packID] = struct{}{}
+		delete(p.pendingRenewals, packID)
 	}
 	if errors.Is(err, errPackUnavailable) {
 		p.missingPacks[packID] = struct{}{}
