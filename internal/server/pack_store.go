@@ -896,6 +896,7 @@ func (p *packStore) discover(ctx context.Context) error {
 			p.listedPacks[id] = struct{}{}
 		}
 	}
+	listed := time.Since(started)
 	p.packsListed = true
 	p.server.stats.packsDiscovered.Add(uint64(len(p.listedPacks)))
 
@@ -949,6 +950,7 @@ func (p *packStore) discover(ctx context.Context) error {
 		}(i)
 	}
 	loading.Wait()
+	loadedIn := time.Since(started) - listed
 
 	manifests := make(map[string]manifest, len(live))
 	parents := make(map[string]struct{})
@@ -981,8 +983,10 @@ func (p *packStore) discover(ctx context.Context) error {
 	// Nothing is served until this returns, so a slow backend shows up as the
 	// server taking a long time to start for no visible reason.
 	p.server.cfg.Logger.Printf(
-		"discovered %d packs and read %d of %d manifests in %s",
-		len(p.listedPacks), len(manifests), len(live), time.Since(started).Round(time.Millisecond))
+		"discovered %d packs and read %d of %d manifests in %s (listing %s, reading %s)",
+		len(p.listedPacks), len(manifests), len(live),
+		time.Since(started).Round(time.Millisecond),
+		listed.Round(time.Millisecond), loadedIn.Round(time.Millisecond))
 	return nil
 }
 
