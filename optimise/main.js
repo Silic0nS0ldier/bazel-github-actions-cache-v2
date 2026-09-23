@@ -6,6 +6,8 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const {
   eventPayload,
+  formatBytes,
+  formatCount,
   input,
   mask,
   parseBoolean,
@@ -72,29 +74,32 @@ function writeJobSummary(result) {
   if (!file) {
     return;
   }
+  const count = (value) => formatCount(value ?? 0);
+  const bytes = (value) => formatBytes(value ?? 0);
+  const yesNo = (value) => (value ? "yes" : "no");
   const rows = [
-    ["Usage records read", result.Records],
-    ["Packs before", result.Packs],
-    ["Live entries", result.Entries],
-    ["Manifests not restorable here", result.Unreadable],
-    ["Packs no manifest names", result.Unmanifested],
-    ["Packs old enough to reap", result.Reapable],
-    ["Packs rebuilt", result.Rebuilt],
-    ["Packs deleted", result.Deleted],
-    ["Packs reaped", result.Reaped],
-    ["Bytes published", result.PublishedBytes],
-    ["Stopped at the byte budget", result.Incomplete],
-    ["Wasted bytes per restore", result.WastedBytes],
-    ["Bytes reclaimed", result.ReclaimedBytes],
-    ["Dry run", result.DryRun],
+    ["Usage records read", count(result.Records)],
+    ["Packs before", count(result.Packs)],
+    ["Live entries", count(result.Entries)],
+    ["Manifests not restorable here", count(result.Unreadable)],
+    ["Packs no manifest names", count(result.Unmanifested)],
+    ["Packs old enough to reap", count(result.Reapable)],
+    ["Packs rebuilt", count(result.Rebuilt)],
+    ["Packs deleted", count(result.Deleted)],
+    ["Packs reaped", count(result.Reaped)],
+    ["Published", bytes(result.PublishedBytes)],
+    ["Stopped at the byte budget", yesNo(result.Incomplete)],
+    ["Wasted per restore", bytes(result.WastedBytes)],
+    ["Reclaimed", bytes(result.ReclaimedBytes)],
+    ["Dry run", yesNo(result.DryRun)],
   ];
   const table = [
     "### Bazel cache layout",
     "",
     ...(result.Skipped ? [`Nothing to do: ${result.Skipped}.`, ""] : []),
     "| Measure | Value |",
-    "| --- | --- |",
-    ...rows.map(([label, value]) => `| ${label} | ${value ?? 0} |`),
+    "| --- | ---: |",
+    ...rows.map(([label, value]) => `| ${label} | ${value} |`),
     "",
   ].join(os.EOL);
   fs.appendFileSync(file, table + os.EOL);
