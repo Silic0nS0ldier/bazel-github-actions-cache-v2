@@ -86,6 +86,7 @@ type Server struct {
 	sem            chan struct{}
 	limiter        *intervalLimiter
 	packs          *packStore
+	usage          *usageRecorder
 }
 
 func New(cfg Config) (*Server, error) {
@@ -155,6 +156,7 @@ func New(cfg Config) (*Server, error) {
 		publishing: make(map[string]*publication),
 		sem:        make(chan struct{}, cfg.MaxConcurrent),
 		limiter:    newIntervalLimiter(cfg.UploadsPerMinute),
+		usage:      newUsageRecorder(),
 	}
 	server.cfg.Backend = &countingBackend{
 		backend: cfg.Backend,
@@ -199,7 +201,18 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Snapshot() Stats {
-	return s.stats.snapshot()
+	stats := s.stats.snapshot()
+	// Restored against used is the ratio that says whether packs are placing
+	// frequently and rarely fetched content together.
+	report := s.usage.report()
+	stats.PackBytesRestored = uint64(report.PackBytesRestored)
+	stats.PackBytesUsed = uint64(report.PackBytesUsed)
+	return stats
+}
+
+// Usage reports which entries this job touched and how.
+func (s *Server) Usage() UsageReport {
+	return s.usage.report()
 }
 
 // Close commits every pending CARv2 batch before the action process exits.
@@ -230,13 +243,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		body := s.Snapshot().JSON()
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		w.WriteHeader(http.StatusOK)
-		if r.Method == http.MethodGet {
-			_, _ = w.Write(body)
-		}
+		s.serveJSON(w, r, s.Snapshot().JSON())
 		return
 	case "/shutdown":
 		s.handleShutdown(w, r)
@@ -292,6 +299,15 @@ func (s *Server) writeObjectHeader(w http.ResponseWriter, size int64) {
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) serveJSON(w http.ResponseWriter, r *http.Request, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		_, _ = w.Write(body)
+	}
 }
 
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
@@ -358,6 +374,14 @@ func (s *Server) failRequest(w http.ResponseWriter, r *http.Request, err error) 
 }
 
 func (s *Server) resolve(ctx context.Context, key, kind, digest string) (object, bool, error) {
+	value, found, err := s.resolveObject(ctx, key, kind, digest)
+	if found && err == nil {
+		s.usage.record(kind, digest, s.packFor(kind, digest), accessDownload, value.size)
+	}
+	return value, found, err
+}
+
+func (s *Server) resolveObject(ctx context.Context, key, kind, digest string) (object, bool, error) {
 	s.objectsMu.RLock()
 	obj, ok := s.objects[key]
 	s.objectsMu.RUnlock()
@@ -436,23 +460,39 @@ func (s *Server) resolve(ctx context.Context, key, kind, digest string) (object,
 // presence reports whether a CAS object can be served, and its recorded size
 // when the storage mode knows that without a download. Packed mode answers
 // from the manifest view and renews the holding pack's retention.
-func (s *Server) presence(ctx context.Context, key string) (int64, bool, error) {
+func (s *Server) presence(ctx context.Context, kind, digest string) (int64, bool, error) {
+	key := s.objectKey(kind, digest)
 	s.objectsMu.RLock()
 	object, ok := s.objects[key]
 	s.objectsMu.RUnlock()
 	if ok {
+		s.usage.record(kind, digest, s.packFor(kind, digest), accessPresence, object.size)
 		return object.size, true, nil
 	}
 	if s.packs != nil {
-		prefix := s.cfg.KeyPrefix + "-cas-"
-		if !strings.HasPrefix(key, prefix) || len(key) != len(prefix)+64 {
+		if kind != "cas" {
 			return 0, false, errors.New("packed storage can only resolve CAS keys")
 		}
-		size, found := s.packs.presence(key[len(prefix):])
+		size, found := s.packs.presence(digest)
+		if found {
+			s.usage.record(kind, digest, s.packFor(kind, digest), accessPresence, size)
+		}
 		return size, found, nil
 	}
 	found, err := s.backendExists(ctx, key)
+	if found {
+		s.usage.record(kind, digest, "", accessPresence, -1)
+	}
 	return -1, found, err
+}
+
+// packFor names the pack serving an entry, which is what lets a later
+// optimisation pass map usage onto cache layout.
+func (s *Server) packFor(kind, digest string) string {
+	if s.packs == nil {
+		return ""
+	}
+	return s.packs.packFor(kind, digest)
 }
 
 func (s *Server) backendExists(ctx context.Context, key string) (bool, error) {

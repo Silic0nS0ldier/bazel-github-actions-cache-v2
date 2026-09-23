@@ -85,6 +85,12 @@ async function main() {
   if (port !== 0 && port === grpcPort) {
     throw new Error("port and grpc-port must differ");
   }
+  // Artifact names must be unique within a job, so two instances of this action
+  // cannot both publish under the same one.
+  const usageArtifact = input("usage-artifact", "").trim();
+  if (usageArtifact && !/^[A-Za-z0-9._-]{1,180}$/.test(usageArtifact)) {
+    throw new Error("usage-artifact must match [A-Za-z0-9._-]{1,180}");
+  }
 
   const tempDir = safeTemporaryDirectory(
     fs.mkdtempSync(path.join(path.resolve(process.env.RUNNER_TEMP), "bazel-gha-cache-v2-")),
@@ -145,6 +151,8 @@ async function main() {
     readyFile,
     "--stats-file",
     statsFile,
+    "--usage-artifact",
+    usageArtifact,
   ];
   const logDescriptor = fs.openSync(logFile, "a", 0o600);
   const child = spawn(binary, args, {
