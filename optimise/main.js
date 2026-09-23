@@ -4,7 +4,14 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { input, mask, parseBoolean, safeTemporaryDirectory, setOutput } = require("../action/lib");
+const {
+  eventPayload,
+  input,
+  mask,
+  parseBoolean,
+  safeTemporaryDirectory,
+  setOutput,
+} = require("../action/lib");
 const { resolveBinary } = require("../action/release");
 
 function positiveInteger(name, fallback, maximum = Number.MAX_SAFE_INTEGER) {
@@ -50,6 +57,7 @@ function writeJobSummary(result) {
     ["Usage records read", result.Records],
     ["Packs before", result.Packs],
     ["Live entries", result.Entries],
+    ["Manifests not restorable here", result.Unreadable],
     ["Packs rebuilt", result.Rebuilt],
     ["Packs deleted", result.Deleted],
     ["Wasted bytes per restore", result.WastedBytes],
@@ -66,6 +74,22 @@ function writeJobSummary(result) {
     "",
   ].join(os.EOL);
   fs.appendFileSync(file, table + os.EOL);
+}
+
+// Deleting a cache entry removes every ref's copy of it, but a replacement
+// published from a branch is only visible to that branch. Applying from
+// anywhere else would strip the rest of the repository of entries it can still
+// read, so only the default branch may apply.
+function requireDefaultBranch() {
+  const defaultBranch = eventPayload().repository?.default_branch;
+  const ref = process.env.GITHUB_REF_NAME;
+  if (!defaultBranch || !ref || ref === defaultBranch) {
+    return;
+  }
+  throw new Error(
+    `refusing to apply from ${ref}: a replacement published here would not be visible to ` +
+      `other branches, while the deletion would affect them; run from ${defaultBranch} or set dry-run`,
+  );
 }
 
 async function main() {
@@ -106,6 +130,9 @@ async function main() {
   const minWasteFraction = fraction("min-waste-fraction", 0.25);
   const dryRun = parseBoolean(input("dry-run", "false"), "dry-run");
   const jobSummary = parseBoolean(input("job-summary", "true"), "job-summary");
+  if (!dryRun) {
+    requireDefaultBranch();
+  }
 
   const tempDir = safeTemporaryDirectory(
     fs.mkdtempSync(path.join(path.resolve(process.env.RUNNER_TEMP), "bazel-gha-optimise-")),

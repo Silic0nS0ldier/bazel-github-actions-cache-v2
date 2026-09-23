@@ -57,6 +57,10 @@ type Layout struct {
 	OrphanPacks int
 	// OrphanManifests are manifests whose pack is gone. They self-expire.
 	OrphanManifests int
+	// UnreadableManifests were listed but could not be restored, because they
+	// belong to another ref's cache scope or were evicted. A plan then rests on
+	// the part of the layout this job can actually see.
+	UnreadableManifests int
 }
 
 type LayoutOptions struct {
@@ -115,11 +119,13 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 		}
 		value, err := loadManifestFrom(ctx, options, key, manifestID)
 		if err != nil {
-			// Readers treat an unreadable manifest as a transient miss, but a
-			// caller of this function deletes things. Acting on a partial view
-			// could conclude a pack is unreferenced when its manifest simply did
-			// not load.
-			return Layout{}, fmt.Errorf("manifest %s is unreadable: %w", manifestID, err)
+			// The REST listing reports entries this job's cache scope cannot
+			// restore, and entries evicted since it was taken, so this is routine.
+			// Skipping is safe because packs enter the layout only through a
+			// manifest that loaded: one that did not is never a deletion candidate.
+			layout.UnreadableManifests++
+			options.Warn("skipping manifest %s: %s", manifestID, safeError(err))
+			continue
 		}
 		if len(value.Packs) != 1 || value.Packs[0].ID != packID {
 			// Readers skip this deterministically, so the merged view matches

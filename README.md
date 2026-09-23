@@ -347,6 +347,17 @@ Three properties are worth knowing before enabling it:
   layout and will find packs gone. Scheduling the pass when the repository is
   quiet narrows that window; nothing can close it.
 
+It only applies from the default branch. Deleting a cache entry removes every
+ref's copy of it, while a replacement published from a branch is visible only to
+that branch, so applying from anywhere else would strip the rest of the
+repository of entries it can still read. `dry-run` works from any ref.
+
+A pass plans from the entries its own cache scope can restore. The REST listing
+also reports entries belonging to other refs, and entries evicted since it was
+taken; those are counted as "not restorable here" in the job summary and left
+alone. A pack is never a deletion candidate unless the manifest describing it
+was read successfully.
+
 `min-runs` refuses to plan from too small a window, since a handful of records
 describes those particular jobs rather than the repository. A pass with too few
 records, or with nothing worth rebuilding, reports that in the job summary and
