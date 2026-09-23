@@ -33,6 +33,7 @@ type Stats struct {
 	ManifestUploads            uint64 `json:"manifest_uploads"`
 	PackDownloads              uint64 `json:"pack_downloads"`
 	PackBytesRestored          uint64 `json:"pack_bytes_restored"`
+	PackBytesDeclared          uint64 `json:"pack_bytes_declared"`
 	PackBytesUsed              uint64 `json:"pack_bytes_used"`
 	PackLoadsSkipped           uint64 `json:"pack_loads_skipped"`
 	PackRenewals               uint64 `json:"pack_renewals"`

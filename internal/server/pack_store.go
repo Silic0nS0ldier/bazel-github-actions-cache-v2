@@ -36,6 +36,7 @@ type packStore struct {
 
 	mu              sync.Mutex
 	packs           map[string]packDescriptor
+	declaredBytes   map[string]int64
 	cas             map[string]manifestObject
 	actions         map[string]manifestAction
 	actionConflicts map[string]struct{}
@@ -95,6 +96,7 @@ func newPackStore(server *Server) (*packStore, error) {
 		renewInterval:   server.cfg.PackRenewInterval,
 		maxManifests:    server.cfg.MaxManifests,
 		packs:           make(map[string]packDescriptor),
+		declaredBytes:   make(map[string]int64),
 		cas:             make(map[string]manifestObject),
 		actions:         make(map[string]manifestAction),
 		actionConflicts: make(map[string]struct{}),
@@ -542,7 +544,7 @@ func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor)
 	}
 	p.server.stats.backendDownloads.Add(1)
 	p.server.stats.packDownloads.Add(1)
-	p.server.usage.packRestored(descriptor.ID, descriptor.Size)
+	p.server.usage.packRestored(descriptor.ID, descriptor.Size, p.declaredBytesFor(descriptor.ID))
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err
@@ -983,17 +985,20 @@ func (p *packStore) loadManifest(ctx context.Context, key, id string) (manifest,
 }
 
 func (p *packStore) applyManifestLocked(id string, value manifest) {
+	var declared int64
 	for _, descriptor := range value.Packs {
 		if existing, found := p.packs[descriptor.ID]; !found || preferPack(descriptor, existing) {
 			p.packs[descriptor.ID] = descriptor
 		}
 	}
 	for _, object := range value.CAS {
+		declared += object.Size
 		if existing, found := p.cas[object.Digest]; !found || preferObject(object, existing) {
 			p.cas[object.Digest] = object
 		}
 	}
 	for _, action := range value.Actions {
+		declared += action.Size
 		if existing, found := p.actions[action.Digest]; found {
 			if existing.CID != action.CID {
 				p.actionConflicts[action.Digest] = struct{}{}
@@ -1002,10 +1007,25 @@ func (p *packStore) applyManifestLocked(id string, value manifest) {
 		}
 		p.actions[action.Digest] = action
 	}
+	// Two manifests naming one pack describe identical content, so the first
+	// wins rather than the total being counted twice.
+	if len(value.Packs) == 1 {
+		if _, known := p.declaredBytes[value.Packs[0].ID]; !known {
+			p.declaredBytes[value.Packs[0].ID] = declared
+		}
+	}
 	for _, parent := range value.Parents {
 		delete(p.heads, parent)
 	}
 	p.heads[id] = struct{}{}
+}
+
+// declaredBytesFor is the uncompressed content a pack holds. Its stored size is
+// compressed, so only this is comparable with the object sizes a job used.
+func (p *packStore) declaredBytesFor(packID string) int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.declaredBytes[packID]
 }
 
 // preferPack and preferObject are the merge tie-breaks. Anything that reasons
