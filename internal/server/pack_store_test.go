@@ -509,3 +509,18 @@ func TestPackedStoreRejectsConflictingActionResults(t *testing.T) {
 		t.Fatalf("conflict was not reported: %+v", restore.Snapshot())
 	}
 }
+
+func TestManifestReadConcurrencyRaisesButNeverLowers(t *testing.T) {
+	for _, test := range []struct {
+		maxConcurrent int
+		want          int
+	}{
+		{maxConcurrent: 1, want: 16},
+		{maxConcurrent: 4, want: 16},
+		{maxConcurrent: 64, want: 64},
+	} {
+		if got := manifestReadConcurrency(test.maxConcurrent); got != test.want {
+			t.Errorf("manifestReadConcurrency(%d) = %d, want %d", test.maxConcurrent, got, test.want)
+		}
+	}
+}

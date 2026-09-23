@@ -933,13 +933,21 @@ func (p *packStore) discover(ctx context.Context) error {
 
 	// Each manifest costs a backend round trip, and nothing is served until they
 	// are all in, so loading them one at a time makes startup scale with the
-	// size of the cache. loadManifest bounds the real concurrency itself.
+	// size of the cache.
 	loaded := make([]*manifest, len(live))
+	reads := make(chan struct{}, manifestReadConcurrency(p.server.cfg.MaxConcurrent))
 	var loading sync.WaitGroup
 	for i := range live {
 		loading.Add(1)
 		go func(i int) {
 			defer loading.Done()
+			select {
+			case reads <- struct{}{}:
+				defer func() { <-reads }()
+			case <-ctx.Done():
+				p.server.stats.manifestLoadErrors.Add(1)
+				return
+			}
 			value, err := p.loadManifest(ctx, live[i].key, live[i].id)
 			if err != nil {
 				p.server.stats.manifestLoadErrors.Add(1)
@@ -990,11 +998,18 @@ func (p *packStore) discover(ctx context.Context) error {
 	return nil
 }
 
-func (p *packStore) loadManifest(ctx context.Context, key, id string) (manifest, error) {
-	if err := p.server.acquire(ctx); err != nil {
-		return manifest{}, err
+// manifestReadConcurrency bounds the startup manifest reads. They are small
+// metadata fetches issued before the server accepts traffic, so they are not
+// held to the blob-transfer limit; a larger --max-concurrent still raises it.
+func manifestReadConcurrency(maxConcurrent int) int {
+	const atStartup = 16
+	if maxConcurrent > atStartup {
+		return maxConcurrent
 	}
-	defer p.server.release()
+	return atStartup
+}
+
+func (p *packStore) loadManifest(ctx context.Context, key, id string) (manifest, error) {
 	var data bytesBuffer
 	backendCtx, cancel := context.WithTimeout(ctx, p.server.cfg.BackendTimeout)
 	found, err := p.server.cfg.Backend.Load(backendCtx, key, &data)
