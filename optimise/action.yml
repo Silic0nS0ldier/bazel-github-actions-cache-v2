@@ -49,7 +49,7 @@ inputs:
     required: false
     default: "false"
   reap-older-than-hours:
-    description: "Only reap packs older than this, so a pack a running job has published but not yet committed a manifest for is out of reach"
+    description: "Only reap packs older than this, so a pack a running job has published but not yet committed a manifest for is out of reach. Fractions are allowed; anything under an hour is for testing only"
     required: false
     default: "24"
   backend-timeout-seconds:

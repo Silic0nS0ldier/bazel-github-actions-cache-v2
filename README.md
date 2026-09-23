@@ -386,6 +386,10 @@ running job has published but not yet committed a manifest for out of reach: the
 two are indistinguishable except by age. A pack whose creation time the listing
 does not report is left alone.
 
+Fractions of an hour are accepted so that a test can reap something it has just
+created. Anything under an hour warns, because it is short enough to take a pack
+a running job is still publishing.
+
 This is worth enabling when the job summary shows a large "packs no manifest
 names" count, which usually means manifests were evicted while their packs
 survived.
