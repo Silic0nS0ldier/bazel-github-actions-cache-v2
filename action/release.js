@@ -5,6 +5,7 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 
 const PROGRAMS = new Set(["cache-server", "cache-optimiser"]);
+const ARCHITECTURES = new Set(["amd64", "arm64"]);
 const USER_AGENT = "bazel-github-actions-cache-v2";
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const VERIFY_TIMEOUT_MS = 60_000;
@@ -14,10 +15,14 @@ const TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 
 // Only names this action publishes are accepted, so a caller cannot steer the
-// download or the install path towards something else.
+// download or the install path towards something else, and an argument left
+// undefined fails here rather than as a path error further down.
 function assetName(program, architecture) {
   if (!PROGRAMS.has(program)) {
     throw new Error(`unknown program ${program}`);
+  }
+  if (!ARCHITECTURES.has(architecture)) {
+    throw new Error(`unknown architecture ${architecture}`);
   }
   return `${program}-linux-${architecture}`;
 }
@@ -145,6 +150,14 @@ async function resolveBinary({
   toolCacheRoot,
   log,
 }) {
+  // Every one of these becomes part of a filesystem path. Checking them here
+  // turns a caller that omits one into a clear error rather than a path fault
+  // several frames away.
+  for (const [name, value] of Object.entries({ actionRoot, installPath, toolCacheRoot })) {
+    if (typeof value !== "string" || value === "") {
+      throw new Error(`resolveBinary needs a ${name}`);
+    }
+  }
   const asset = assetName(program, architecture);
   const localBinary = path.join(actionRoot, "dist", asset);
   if (fs.existsSync(localBinary)) {
