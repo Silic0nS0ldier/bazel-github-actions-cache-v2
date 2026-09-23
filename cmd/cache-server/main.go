@@ -17,6 +17,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/cre4ture/bazel-github-actions-cache-v2/internal/artifact"
 	"github.com/cre4ture/bazel-github-actions-cache-v2/internal/cache"
 	cacheserver "github.com/cre4ture/bazel-github-actions-cache-v2/internal/server"
 )
@@ -59,6 +60,7 @@ func run() error {
 		backendTimeout   = flag.Duration("backend-timeout", 5*time.Minute, "timeout per backend operation")
 		readyFile        = flag.String("ready-file", "", "write startup metadata to this file")
 		statsFile        = flag.String("stats-file", "", "write final statistics to this file")
+		usageArtifact    = flag.String("usage-artifact", "", "publish the usage record as a job artifact with this name; empty disables it")
 		showVersion      = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -203,8 +205,29 @@ func run() error {
 	if err := cacheserver.WriteStatsFile(*statsFile, stats); err != nil {
 		logger.Printf("write stats: %v", err)
 	}
+	// Published here rather than by a workflow step because post steps run last;
+	// nothing else gets a chance to collect it.
+	publishUsage(*usageArtifact, srv, *backendTimeout, logger)
 	logger.Printf("stopped: %s", strings.TrimSpace(string(stats.JSON())))
 	return nil
+}
+
+func publishUsage(name string, srv *cacheserver.Server, timeout time.Duration, logger *log.Logger) {
+	if name == "" {
+		return
+	}
+	uploader, err := artifact.New(timeout)
+	if err != nil {
+		logger.Printf("not publishing the usage record: %v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := uploader.Upload(ctx, name, "cache-usage.json", srv.Usage().JSON()); err != nil {
+		logger.Printf("publishing the usage record failed: %v", err)
+		return
+	}
+	logger.Printf("published the usage record as artifact %q", name)
 }
 
 // stopGRPC drains in-flight RPCs, but does not let a stuck stream hold up the

@@ -95,8 +95,7 @@ func (v *actionResultValidator) validateBlob(reference digestReference) error {
 		return err
 	}
 	v.collect(reference)
-	key := v.server.cfg.KeyPrefix + "-cas-" + reference.hash
-	size, found, err := v.casPresence(key)
+	size, found, err := v.casPresence(reference.hash)
 	if err != nil {
 		return err
 	}
@@ -187,7 +186,7 @@ func (v *actionResultValidator) loadCAS(reference digestReference) (object, erro
 	if err := v.reserveObject(); err != nil {
 		return object{}, err
 	}
-	key := v.server.cfg.KeyPrefix + "-cas-" + reference.hash
+	key := v.server.objectKey("cas", reference.hash)
 	if v.requirePersisted {
 		found, err := v.server.backendExists(v.context, key)
 		if err != nil {
@@ -219,12 +218,12 @@ func (v *actionResultValidator) loadCAS(reference digestReference) (object, erro
 // casPresence reports availability without downloading where the storage mode
 // allows it, and the recorded object size when it is known. Publication still
 // demands a persisted entry.
-func (v *actionResultValidator) casPresence(key string) (int64, bool, error) {
+func (v *actionResultValidator) casPresence(digest string) (int64, bool, error) {
 	if v.requirePersisted {
-		found, err := v.server.backendExists(v.context, key)
+		found, err := v.server.backendExists(v.context, v.server.objectKey("cas", digest))
 		return -1, found, err
 	}
-	return v.server.presence(v.context, key)
+	return v.server.presence(v.context, "cas", digest)
 }
 
 func (v *actionResultValidator) reserveObject() error {

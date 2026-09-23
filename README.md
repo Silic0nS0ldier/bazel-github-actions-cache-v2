@@ -16,6 +16,8 @@ removes its private runner temporary directory.
 > This project is experimental. It uses the cache-v2 runner service exposed to
 > GitHub Actions, through `github.com/tonistiigi/go-actions-cache`. GitHub does
 > not document that runner upload/download protocol as a stable public API.
+> Publishing the usage record likewise speaks the runner's artifact service
+> directly, the same undocumented API behind `actions/upload-artifact`.
 > Pin this action to a full commit SHA and evaluate the limits below before
 > making it a required CI dependency.
 
@@ -216,12 +218,52 @@ Do not enable Bazel remote-cache compression with this release.
 | `backend-timeout-seconds` | `300` | Timeout for one GitHub cache operation and initial packed-manifest discovery |
 | `port` | `0` | Loopback port; zero chooses a free dynamic port |
 | `grpc-port` | `0` | Loopback port for the gRPC API; zero chooses a free dynamic port |
+| `usage-artifact` | `bazel-cache-usage` | Job artifact to publish the usage record to; empty disables it |
 
-The main step outputs `url`, `grpc-url`, `stats-url`, `writable`, `bazel-args`,
-`grpc-bazel-args`, and `initial-stats`. The post step emits `final-stats` and
-always writes the final counts to the job summary. Because post steps run after
-normal job steps, consume `stats-url` during the job if a later step must assert
-statistics.
+The main step outputs `url`, `grpc-url`, `stats-url`, `writable`,
+`bazel-args`, `grpc-bazel-args`, and `initial-stats`. The post step emits
+`final-stats` and always writes the final counts to the job summary. Because
+post steps run after normal job steps, consume `stats-url` during the job if a
+later step must read it.
+
+### Which entries a job used
+
+The post step publishes a job artifact named by `usage-artifact`, holding a
+single `cache-usage.json`. It reports every cache entry the job touched, and
+whether it was downloaded or only presence-checked:
+
+```json
+{
+  "entries": [
+    {"kind": "cas", "digest": "…", "pack": "…",
+     "presence_checks": 1, "downloads": 0},
+    {"kind": "cas", "digest": "…", "pack": "…", "size": 4096,
+     "presence_checks": 1, "downloads": 1}
+  ],
+  "packs": [{"id": "…", "size": 8388608, "bytes_used": 4096, "restored": true}],
+  "pack_bytes_restored": 8388608,
+  "pack_bytes_used": 4096
+}
+```
+
+`size` is absent when nothing reported one, which objects mode never does for a
+bare presence check. It is never defaulted to zero, because zero is a real size
+belonging to a blob with a well-known digest.
+
+The distinction matters. Under `--remote_download_minimal` most outputs are only
+ever presence-checked: they still have to exist, or the action result referencing
+them becomes a miss, but nothing needs their bytes. An entry with no presence
+checks and no downloads is the only kind nothing depends on.
+
+`pack_bytes_restored` against `pack_bytes_used` is the headline number for
+`packs` mode. It is the share of downloaded pack bytes a job turned out to want,
+so a low ratio means packs are placing frequently and rarely fetched content
+together. Both appear in the final statistics.
+
+To keep the record, nothing is required. Set `usage-artifact` to an empty string
+to opt out, or to a distinct name per instance if one job runs this action more
+than once, since artifact names must be unique within a job. A failed upload
+warns and never fails the job.
 
 ## Protocol support
 

@@ -291,6 +291,23 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 
 // presence answers a CAS presence check from the manifest view alone, without
 // restoring the pack, and schedules a retention renewal for it.
+// packFor names the pack an entry is served from, or nothing when the entry is
+// not mapped by the merged manifest view.
+func (p *packStore) packFor(kind, digest string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if kind == "cas" {
+		if entry, found := p.cas[digest]; found {
+			return entry.PackID
+		}
+		return ""
+	}
+	if entry, found := p.actions[digest]; found {
+		return entry.PackID
+	}
+	return ""
+}
+
 func (p *packStore) presence(digest string) (int64, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -525,6 +542,7 @@ func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor)
 	}
 	p.server.stats.backendDownloads.Add(1)
 	p.server.stats.packDownloads.Add(1)
+	p.server.usage.packRestored(descriptor.ID, descriptor.Size)
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err

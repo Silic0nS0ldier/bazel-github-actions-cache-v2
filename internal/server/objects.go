@@ -83,7 +83,7 @@ func (s *Server) openObject(ctx context.Context, kind, digest string) (*os.File,
 // so restoring a whole pack to answer one would defeat the point.
 func (s *Server) casPresence(ctx context.Context, digest string) (int64, error) {
 	s.stats.operations.Add(1)
-	size, found, err := s.presence(ctx, s.objectKey("cas", digest))
+	size, found, err := s.presence(ctx, "cas", digest)
 	if err != nil {
 		s.cfg.Logger.Printf("presence check for cas/%s failed: %s", digest, safeError(err))
 	}

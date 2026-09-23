@@ -73,6 +73,10 @@ inputs:
     description: "Loopback port for the gRPC remote-cache API; zero selects an available dynamic port"
     required: false
     default: "0"
+  usage-artifact:
+    description: "Publish the cache usage record as a job artifact during cleanup; set to an empty string to disable"
+    required: false
+    default: bazel-cache-usage
 outputs:
   url:
     description: "Loopback Bazel HTTP remote-cache URL"
