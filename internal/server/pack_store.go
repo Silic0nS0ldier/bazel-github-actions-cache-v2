@@ -874,6 +874,7 @@ type manifestReference struct {
 }
 
 func (p *packStore) discover(ctx context.Context) error {
+	started := time.Now()
 	// Listing reads metadata only: unlike a download it does not extend an
 	// entry's lifetime, so both listings are unbounded and max-manifests is
 	// spent on downloads instead. Manifests are listed first, so the pack
@@ -929,13 +930,31 @@ func (p *packStore) discover(ctx context.Context) error {
 		live = live[:p.maxManifests]
 	}
 
+	// Each manifest costs a backend round trip, and nothing is served until they
+	// are all in, so loading them one at a time makes startup scale with the
+	// size of the cache. loadManifest bounds the real concurrency itself.
+	loaded := make([]*manifest, len(live))
+	var loading sync.WaitGroup
+	for i := range live {
+		loading.Add(1)
+		go func(i int) {
+			defer loading.Done()
+			value, err := p.loadManifest(ctx, live[i].key, live[i].id)
+			if err != nil {
+				p.server.stats.manifestLoadErrors.Add(1)
+				p.server.cfg.Logger.Printf("ignoring unavailable manifest %s: %s", live[i].id, safeError(err))
+				return
+			}
+			loaded[i] = &value
+		}(i)
+	}
+	loading.Wait()
+
 	manifests := make(map[string]manifest, len(live))
 	parents := make(map[string]struct{})
-	for _, reference := range live {
-		value, err := p.loadManifest(ctx, reference.key, reference.id)
-		if err != nil {
-			p.server.stats.manifestLoadErrors.Add(1)
-			p.server.cfg.Logger.Printf("ignoring unavailable manifest %s: %s", reference.id, safeError(err))
+	for i, reference := range live {
+		value := loaded[i]
+		if value == nil {
 			continue
 		}
 		if len(value.Packs) != 1 || value.Packs[0].ID != reference.packID {
@@ -943,7 +962,7 @@ func (p *packStore) discover(ctx context.Context) error {
 			p.server.cfg.Logger.Printf("ignoring manifest %s: it does not commit the pack %s named by its key", reference.id, reference.packID)
 			continue
 		}
-		manifests[reference.id] = value
+		manifests[reference.id] = *value
 		for _, parent := range value.Parents {
 			parents[parent] = struct{}{}
 		}
@@ -959,6 +978,11 @@ func (p *packStore) discover(ctx context.Context) error {
 			p.heads[id] = struct{}{}
 		}
 	}
+	// Nothing is served until this returns, so a slow backend shows up as the
+	// server taking a long time to start for no visible reason.
+	p.server.cfg.Logger.Printf(
+		"discovered %d packs and read %d of %d manifests in %s",
+		len(p.listedPacks), len(manifests), len(live), time.Since(started).Round(time.Millisecond))
 	return nil
 }
 
