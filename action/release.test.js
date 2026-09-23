@@ -29,6 +29,9 @@ function resolve(overrides) {
   return resolveBinary({
     program: "cache-server",
     architecture: "amd64",
+    actionRoot: "/action",
+    installPath: "/tmp/installed",
+    toolCacheRoot: "/tmp/tools",
     repository: REPOSITORY,
     ref: "v1.2.3",
     token: "",
@@ -67,11 +70,39 @@ test("release assets are addressed by tag, not by latest", () => {
 });
 
 // The program name reaches a download URL and an install path, so only names
-// this action actually publishes may be used.
-test("an unknown program name is rejected", () => {
+// this action actually publishes may be used. An argument left undefined has to
+// fail here rather than as a path error further down.
+test("an unknown program or architecture is rejected", () => {
   for (const program of ["", "sh", "../cache-server", undefined]) {
     assert.throws(() => assetName(program, "amd64"), /unknown program/);
   }
+  for (const architecture of ["", "x64", "../../etc", undefined]) {
+    assert.throws(() => assetName("cache-server", architecture), /unknown architecture/);
+  }
+});
+
+test("an option that would become part of a path is required", async () => {
+  const complete = {
+    program: "cache-server",
+    actionRoot: "/action",
+    architecture: "amd64",
+    installPath: "/tmp/installed",
+    repository: REPOSITORY,
+    ref: "v1.2.3",
+    token: "",
+    toolCacheRoot: "/tmp/tools",
+    log: () => {},
+  };
+  for (const name of ["actionRoot", "installPath", "toolCacheRoot"]) {
+    await assert.rejects(
+      resolveBinary({ ...complete, [name]: undefined }),
+      new RegExp(`resolveBinary needs a ${name}`),
+    );
+  }
+  await assert.rejects(
+    resolveBinary({ ...complete, architecture: undefined }),
+    /unknown architecture/,
+  );
 });
 
 // Both binaries are cached under the same root, so sharing a directory would

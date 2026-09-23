@@ -116,6 +116,7 @@ async function main() {
   const binary = await resolveBinary({
     program: "cache-optimiser",
     actionRoot: path.resolve(__dirname, ".."),
+    architecture,
     // Installing under a fixed name keeps every part of the spawned path a
     // constant, so no release name can influence which program runs.
     installPath: path.join(tempDir, "cache-optimiser"),
