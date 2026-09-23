@@ -7,10 +7,16 @@ import (
 
 // Stats is a point-in-time JSON representation of cache activity.
 type Stats struct {
-	Requests                   uint64 `json:"requests"`
-	Operations                 uint64 `json:"operations"`
-	Hits                       uint64 `json:"hits"`
-	Misses                     uint64 `json:"misses"`
+	Requests   uint64 `json:"requests"`
+	Operations uint64 `json:"operations"`
+	Hits       uint64 `json:"hits"`
+	Misses     uint64 `json:"misses"`
+	// The four buckets below partition Misses, so they always sum to it.
+	MissesAC                   uint64 `json:"misses_ac"`
+	MissesCAS                  uint64 `json:"misses_cas"`
+	MissesPresence             uint64 `json:"misses_presence"`
+	MissesRejected             uint64 `json:"misses_rejected"`
+	MissesDegraded             uint64 `json:"misses_degraded"`
 	Uploads                    uint64 `json:"uploads"`
 	DeduplicatedUploads        uint64 `json:"deduplicated_uploads"`
 	DiscardedUploads           uint64 `json:"discarded_uploads"`
@@ -56,6 +62,11 @@ type counters struct {
 	operations                 atomic.Uint64
 	hits                       atomic.Uint64
 	misses                     atomic.Uint64
+	missesAC                   atomic.Uint64
+	missesCAS                  atomic.Uint64
+	missesPresence             atomic.Uint64
+	missesRejected             atomic.Uint64
+	missesDegraded             atomic.Uint64
 	uploads                    atomic.Uint64
 	deduplicatedUploads        atomic.Uint64
 	discardedUploads           atomic.Uint64
@@ -99,6 +110,11 @@ func (c *counters) snapshot() Stats {
 		Operations:                 c.operations.Load(),
 		Hits:                       c.hits.Load(),
 		Misses:                     c.misses.Load(),
+		MissesAC:                   c.missesAC.Load(),
+		MissesCAS:                  c.missesCAS.Load(),
+		MissesPresence:             c.missesPresence.Load(),
+		MissesRejected:             c.missesRejected.Load(),
+		MissesDegraded:             c.missesDegraded.Load(),
 		Uploads:                    c.uploads.Load(),
 		DeduplicatedUploads:        c.deduplicatedUploads.Load(),
 		DiscardedUploads:           c.discardedUploads.Load(),

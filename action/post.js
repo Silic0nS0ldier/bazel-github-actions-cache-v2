@@ -67,6 +67,11 @@ function buildSummary(stats) {
   const detail = [
     ["Requests", count("requests")],
     ["Operations", count("operations")],
+    ["Missing action results", count("misses_ac")],
+    ["Missing CAS objects", count("misses_cas")],
+    ["Failed presence checks", count("misses_presence")],
+    ["Unusable action results", count("misses_rejected")],
+    ["Misses from degraded backend", count("misses_degraded")],
     ["Rejected requests", count("rejected_requests")],
     ["Deduplicated uploads", count("deduplicated_uploads")],
     ["Read-only discarded uploads", count("discarded_uploads")],

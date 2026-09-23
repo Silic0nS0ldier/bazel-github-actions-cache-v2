@@ -174,6 +174,31 @@ func TestCASPutHeadGet(t *testing.T) {
 	}
 }
 
+func TestMissBreakdownAccountsForEveryMiss(t *testing.T) {
+	server := testServer(t, newMemoryBackend(), nil)
+	for _, path := range []string{
+		"/cas/" + digest([]byte("absent blob")),
+		"/ac/" + digest([]byte("absent action")),
+	} {
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("GET %s status = %d", path, response.Code)
+		}
+	}
+
+	stats := server.Snapshot()
+	if stats.MissesCAS != 1 || stats.MissesAC != 1 {
+		t.Fatalf("misses were not attributed by kind: %+v", stats)
+	}
+	// The breakdown is only useful if it explains the headline number.
+	total := stats.MissesAC + stats.MissesCAS + stats.MissesPresence +
+		stats.MissesRejected + stats.MissesDegraded
+	if total != stats.Misses {
+		t.Fatalf("breakdown sums to %d, but misses = %d", total, stats.Misses)
+	}
+}
+
 func TestDuplicateCASPutsArePublishedOnlyOnce(t *testing.T) {
 	backend := newMemoryBackend()
 	server := testServer(t, backend, nil)

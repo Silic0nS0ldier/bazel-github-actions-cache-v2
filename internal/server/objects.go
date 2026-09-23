@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sync/atomic"
 )
 
 // Transport-neutral outcomes of a cache operation. Cache policy — the fail-open
@@ -25,11 +26,18 @@ func (s *Server) objectKey(kind, digest string) string {
 	return s.cfg.KeyPrefix + "-" + kind + "-" + digest
 }
 
+// recordMiss counts a miss against both the headline total and the bucket that
+// explains it, so the breakdown can never drift from the total.
+func (s *Server) recordMiss(bucket *atomic.Uint64) {
+	s.stats.misses.Add(1)
+	bucket.Add(1)
+}
+
 // degrade reports a backend failure as a miss when the server is fail-open, so
 // that a cache outage slows a build down instead of breaking it.
 func (s *Server) degrade(failure error) error {
 	if s.cfg.FailOpen {
-		s.stats.misses.Add(1)
+		s.recordMiss(&s.stats.missesDegraded)
 		return errCacheMiss
 	}
 	return failure
@@ -46,7 +54,11 @@ func (s *Server) readObject(ctx context.Context, kind, digest string) (object, e
 		return object{}, s.degrade(errBackendFailure)
 	}
 	if !found {
-		s.stats.misses.Add(1)
+		if kind == "ac" {
+			s.recordMiss(&s.stats.missesAC)
+		} else {
+			s.recordMiss(&s.stats.missesCAS)
+		}
 		return object{}, errCacheMiss
 	}
 	if kind == "ac" {
@@ -69,7 +81,7 @@ func (s *Server) openObject(ctx context.Context, kind, digest string) (*os.File,
 		s.stats.backendLoadErrors.Add(1)
 		s.cfg.Logger.Printf("open local cache object %s/%s: %v", kind, digest, err)
 		if s.cfg.FailOpen {
-			s.stats.misses.Add(1)
+			s.recordMiss(&s.stats.missesDegraded)
 			return nil, 0, errCacheMiss
 		}
 		return nil, 0, errLocalFailure
@@ -88,7 +100,7 @@ func (s *Server) casPresence(ctx context.Context, digest string) (int64, error) 
 		s.cfg.Logger.Printf("presence check for cas/%s failed: %s", digest, safeError(err))
 	}
 	if err != nil || !found {
-		s.stats.misses.Add(1)
+		s.recordMiss(&s.stats.missesPresence)
 		return 0, errCacheMiss
 	}
 	s.stats.hits.Add(1)
@@ -128,12 +140,12 @@ func (s *Server) validateStoredActionResult(ctx context.Context, digest string, 
 		return nil
 	case errors.Is(err, errIncompleteActionResult):
 		s.stats.incompleteActionResults.Add(1)
-		s.stats.misses.Add(1)
+		s.recordMiss(&s.stats.missesRejected)
 		s.cfg.Logger.Printf("action result ac/%s is incomplete: %s", digest, safeError(err))
 		return errCacheMiss
 	case errors.Is(err, errInvalidActionResult):
 		s.stats.invalidActionResults.Add(1)
-		s.stats.misses.Add(1)
+		s.recordMiss(&s.stats.missesRejected)
 		s.cfg.Logger.Printf("action result ac/%s is invalid: %s", digest, safeError(err))
 		return errCacheMiss
 	default:
