@@ -120,8 +120,8 @@ func run() error {
 		logger.Printf("read %d usage records; nothing to do: %s", result.Records, result.Skipped)
 		return nil
 	}
-	logger.Printf("read %d usage records; rebuilt %d packs, deleted %d, reaped %d",
-		result.Records, result.Rebuilt, result.Deleted, result.Reaped)
+	logger.Printf("read %d usage records; rebuilt %d packs, deleted %d, reaped %d of %d reapable",
+		result.Records, result.Rebuilt, result.Deleted, result.Reaped, result.Reapable)
 	return nil
 }
 

@@ -78,6 +78,7 @@ function writeJobSummary(result) {
     ["Live entries", result.Entries],
     ["Manifests not restorable here", result.Unreadable],
     ["Packs no manifest names", result.Unmanifested],
+    ["Packs old enough to reap", result.Reapable],
     ["Packs rebuilt", result.Rebuilt],
     ["Packs deleted", result.Deleted],
     ["Packs reaped", result.Reaped],

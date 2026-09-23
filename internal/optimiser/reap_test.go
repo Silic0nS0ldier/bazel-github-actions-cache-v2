@@ -36,12 +36,12 @@ func TestReapRemovesOldPacksNoManifestNames(t *testing.T) {
 		{Key: "prefix-car-pack-v1-old", CreatedAt: time.Now().Add(-72 * time.Hour)},
 	})
 
-	reaped, err := reap(context.Background(), options, layout)
+	reapable, reaped, err := reap(context.Background(), options, layout)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reaped != 1 || len(pruner.deleted) != 1 {
-		t.Fatalf("reaped %d, deleted %v", reaped, pruner.deleted)
+	if reapable != 1 || reaped != 1 || len(pruner.deleted) != 1 {
+		t.Fatalf("reapable %d, reaped %d, deleted %v", reapable, reaped, pruner.deleted)
 	}
 }
 
@@ -56,12 +56,12 @@ func TestReapLeavesRecentPacksAlone(t *testing.T) {
 		{Key: "prefix-car-pack-v1-fresh", CreatedAt: time.Now().Add(-time.Minute)},
 	})
 
-	reaped, err := reap(context.Background(), options, layout)
+	reapable, reaped, err := reap(context.Background(), options, layout)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reaped != 0 || len(pruner.deleted) != 0 {
-		t.Fatalf("reaped %d, deleted %v", reaped, pruner.deleted)
+	if reapable != 0 || reaped != 0 || len(pruner.deleted) != 0 {
+		t.Fatalf("reapable %d, reaped %d, deleted %v", reapable, reaped, pruner.deleted)
 	}
 }
 
@@ -77,12 +77,12 @@ func TestReapLeavesPacksWithNoKnownAge(t *testing.T) {
 		nil,
 		{{Key: "prefix-car-pack-v1-unknown"}},
 	} {
-		reaped, err := reap(context.Background(), reapOptions(pruner, entries), layout)
+		reapable, reaped, err := reap(context.Background(), reapOptions(pruner, entries), layout)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if reaped != 0 || len(pruner.deleted) != 0 {
-			t.Fatalf("reaped %d, deleted %v", reaped, pruner.deleted)
+		if reapable != 0 || reaped != 0 || len(pruner.deleted) != 0 {
+			t.Fatalf("reapable %d, reaped %d, deleted %v", reapable, reaped, pruner.deleted)
 		}
 	}
 }
@@ -100,12 +100,38 @@ func TestReapOnlyEverSeesUnmanifestedPacks(t *testing.T) {
 		{Key: "prefix-car-pack-v1-live", CreatedAt: time.Now().Add(-72 * time.Hour)},
 	})
 
-	reaped, err := reap(context.Background(), options, layout)
+	reapable, reaped, err := reap(context.Background(), options, layout)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if reapable != 0 || reaped != 0 || len(pruner.deleted) != 0 {
+		t.Fatalf("reapable %d, reaped %d, deleted %v", reapable, reaped, pruner.deleted)
+	}
+}
+
+// A dry run has to apply the age filter, or its count says nothing about what a
+// real pass would remove.
+func TestReapCountsCandidatesOnADryRunWithoutDeleting(t *testing.T) {
+	pruner := &recordingPruner{}
+	layout := server.Layout{UnmanifestedPacks: []server.LayoutPack{
+		{ID: "old", Key: "prefix-car-pack-v1-old"},
+		{ID: "fresh", Key: "prefix-car-pack-v1-fresh"},
+	}}
+	options := reapOptions(pruner, []cache.CatalogEntry{
+		{Key: "prefix-car-pack-v1-old", CreatedAt: time.Now().Add(-72 * time.Hour)},
+		{Key: "prefix-car-pack-v1-fresh", CreatedAt: time.Now().Add(-time.Minute)},
+	})
+	options.DryRun = true
+
+	reapable, reaped, err := reap(context.Background(), options, layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reapable != 1 {
+		t.Fatalf("reapable = %d, want the one old enough", reapable)
+	}
 	if reaped != 0 || len(pruner.deleted) != 0 {
-		t.Fatalf("reaped %d, deleted %v", reaped, pruner.deleted)
+		t.Fatalf("a dry run deleted %d packs: %v", reaped, pruner.deleted)
 	}
 }
 
@@ -115,7 +141,7 @@ func TestReapRefusesWithoutAnAgeThreshold(t *testing.T) {
 	}}
 	options := reapOptions(&recordingPruner{}, nil)
 	options.ReapOlderThan = 0
-	if _, err := reap(context.Background(), options, layout); err == nil {
+	if _, _, err := reap(context.Background(), options, layout); err == nil {
 		t.Fatal("reaped without an age threshold")
 	}
 }
