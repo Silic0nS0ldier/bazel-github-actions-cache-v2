@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -220,6 +221,34 @@ func TestRepackerSplitsEntriesAcrossPacks(t *testing.T) {
 		if got := reader.packFor("cas", digest(blob)); got != placement[digest(blob)] {
 			t.Fatalf("%s is served from %s, want %s", digest(blob), got, placement[digest(blob)])
 		}
+	}
+}
+
+// The optimiser passes a spool path that does not exist yet, because it never
+// goes through New, which is what creates one for a cache server.
+func TestRepackerCreatesItsSpoolDirectory(t *testing.T) {
+	backend := newMemoryBackend()
+	blob := []byte("an output to move")
+	seedPacked(t, backend, blob)
+	layout := readLayout(t, backend)
+
+	spool := filepath.Join(t.TempDir(), "missing", "spool")
+	repacker, err := NewRepacker(RepackOptions{
+		Backend:     backend,
+		CacheDir:    spool,
+		KeyPrefix:   "test-v1",
+		MaxBlobSize: 1 << 20,
+		Timeout:     5 * time.Second,
+		Parents:     layout.Heads,
+		Packs:       layout.Packs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repacker.Close()
+
+	if _, _, err := repacker.Publish(context.Background(), layout.Entries); err != nil {
+		t.Fatal(err)
 	}
 }
 

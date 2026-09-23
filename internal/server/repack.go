@@ -58,6 +58,11 @@ func NewRepacker(options RepackOptions) (*Repacker, error) {
 	if options.UploadsPerMinute <= 0 {
 		options.UploadsPerMinute = 180
 	}
+	// The cache server creates its spool in New; a repacker has no equivalent, so
+	// it makes its own.
+	if err := os.MkdirAll(options.CacheDir, 0o700); err != nil {
+		return nil, fmt.Errorf("prepare the repacking spool: %w", err)
+	}
 	packs := make(map[string]LayoutPack, len(options.Packs))
 	for _, pack := range options.Packs {
 		packs[pack.ID] = pack
