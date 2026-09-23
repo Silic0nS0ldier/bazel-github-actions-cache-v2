@@ -39,8 +39,12 @@ function runWrapper(t, inputs) {
 
   const result = spawnSync(process.execPath, [path.join(__dirname, "main.js")], {
     encoding: "utf8",
+    // Deliberately not inheriting the environment: on a runner the ambient
+    // GITHUB_* variables describe the job running the test, and the wrapper
+    // would read them as its own context.
     env: {
-      ...process.env,
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
       STUB_ARGS_FILE: argsFile,
       RUNNER_TEMP: runnerTemp,
       RUNNER_TOOL_CACHE: path.join(runnerTemp, "tools"),
