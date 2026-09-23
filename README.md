@@ -390,6 +390,9 @@ Fractions of an hour are accepted so that a test can reap something it has just
 created. Anything under an hour warns, because it is short enough to take a pack
 a running job is still publishing.
 
+A dry run applies the age filter and reports how many packs it would take, so
+"packs old enough to reap" is the number to look at before enabling it.
+
 This is worth enabling when the job summary shows a large "packs no manifest
 names" count, which usually means manifests were evicted while their packs
 survived.

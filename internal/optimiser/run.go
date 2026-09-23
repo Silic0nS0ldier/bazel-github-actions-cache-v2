@@ -63,6 +63,9 @@ type Result struct {
 	Incomplete bool
 	// Reaped counts packs removed because no manifest named them.
 	Reaped int
+	// Reapable counts packs that passed the age filter, whether or not this
+	// pass was allowed to delete them.
+	Reapable int
 	// Unmanifested counts packs no manifest names, whether or not they were
 	// reaped.
 	Unmanifested int
@@ -112,14 +115,20 @@ func Run(ctx context.Context, options RunOptions) (Result, error) {
 		DryRun:       options.DryRun,
 	}
 	// Reaping is independent of any repacking plan: an unmanifested pack is
-	// unreachable whether or not the rest of the layout is worth rebuilding.
-	if options.Reap && !options.DryRun {
-		reaped, err := reap(ctx, options, layout)
+	// unreachable whether or not the rest of the layout is worth rebuilding. A
+	// dry run still applies the age filter, so its count means something.
+	if options.Reap {
+		reapable, reaped, err := reap(ctx, options, layout)
+		result.Reapable = reapable
 		result.Reaped = reaped
 		if err != nil {
 			return result, err
 		}
-		options.Log("reaped %d packs no manifest names", reaped)
+		if options.DryRun {
+			options.Log("%d packs no manifest names are old enough to reap", reapable)
+		} else {
+			options.Log("reaped %d packs no manifest names", reaped)
+		}
 	}
 	plan, err := NewPlan(layout, demand, options.Plan)
 	if errors.Is(err, errTooFewRuns) {
