@@ -89,6 +89,12 @@ func (b *memoryBackend) existsCount() int {
 	return b.existsCalls
 }
 
+func (b *memoryBackend) remove(key string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.objects, key)
+}
+
 func (b *memoryBackend) Save(_ context.Context, key string, src *os.File, size int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

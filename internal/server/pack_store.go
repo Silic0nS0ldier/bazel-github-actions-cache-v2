@@ -700,7 +700,7 @@ func (p *packStore) buildPackLocked(ctx context.Context, casDigests, actionDiges
 	if err != nil {
 		return "", packedEntries{}, 0, "", err
 	}
-	store, err := blockstore.OpenReadWrite(path, []cid.Cid{blocksToWrite[0].cid}, blockstore.UseWholeCIDs(true))
+	store, err := openPackWriter(path, blocksToWrite[0].cid)
 	if err != nil {
 		return "", packedEntries{}, 0, "", err
 	}
@@ -984,12 +984,12 @@ func (p *packStore) loadManifest(ctx context.Context, key, id string) (manifest,
 
 func (p *packStore) applyManifestLocked(id string, value manifest) {
 	for _, descriptor := range value.Packs {
-		if existing, found := p.packs[descriptor.ID]; !found || descriptor.Key < existing.Key {
+		if existing, found := p.packs[descriptor.ID]; !found || preferPack(descriptor, existing) {
 			p.packs[descriptor.ID] = descriptor
 		}
 	}
 	for _, object := range value.CAS {
-		if existing, found := p.cas[object.Digest]; !found || object.PackID < existing.PackID {
+		if existing, found := p.cas[object.Digest]; !found || preferObject(object, existing) {
 			p.cas[object.Digest] = object
 		}
 	}
@@ -1006,6 +1006,17 @@ func (p *packStore) applyManifestLocked(id string, value manifest) {
 		delete(p.heads, parent)
 	}
 	p.heads[id] = struct{}{}
+}
+
+// preferPack and preferObject are the merge tie-breaks. Anything that reasons
+// about the stored layout has to resolve a digest to the same copy a reader
+// would be served, so the rules live in exactly one place.
+func preferPack(candidate, existing packDescriptor) bool {
+	return candidate.Key < existing.Key
+}
+
+func preferObject(candidate, existing manifestObject) bool {
+	return candidate.PackID < existing.PackID
 }
 
 func parseManifestKey(prefix, key string) (string, string, bool) {
@@ -1035,6 +1046,12 @@ func parsePackKey(prefix, key string) (string, bool) {
 }
 
 const rawCIDSectionOverheadBytes = 64
+
+// openPackWriter starts a CARv2 pack. Every writer uses the same options, so a
+// pack a later pass rebuilds is framed exactly like the one it replaces.
+func openPackWriter(path string, root cid.Cid) (*blockstore.ReadWrite, error) {
+	return blockstore.OpenReadWrite(path, []cid.Cid{root}, blockstore.UseWholeCIDs(true))
+}
 
 func readCARBlock(ctx context.Context, path, contentCID string, maxBlobSize int64) ([]byte, error) {
 	// CAR sections include the block CID as well as the payload. Packs use

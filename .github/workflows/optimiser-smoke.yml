@@ -1,0 +1,60 @@
+name: Optimiser smoke
+
+# This repository has no production cache to maintain. The only packed cache it
+# owns is the one the cache smoke test writes, so this workflow exists to prove
+# the optimiser works against a real GitHub Actions cache, which nothing else
+# covers: the unit tests run entirely against an in-memory backend.
+
+on:
+  schedule:
+    # Weekly, purely to catch drift in the Actions REST and artifact APIs.
+    - cron: "17 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Plan and report without publishing or deleting"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Shared with the cache smoke test, which writes the same key prefix. Deleting
+# packs out from under it would fail it for reasons that have nothing to do
+# with the change under test.
+concurrency:
+  group: bazel-smoke-cache
+  cancel-in-progress: false
+
+jobs:
+  optimise:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Deleting the cache entries a pass replaces is the only thing that needs
+      # write.
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+          cache: true
+
+      # The action prefers a local dist/ over a release, so this exercises the
+      # code under review rather than a published binary.
+      - name: Build the optimiser under review
+        env:
+          VERSION: smoke-${{ github.sha }}
+        run: scripts/build-dist.sh
+
+      - name: Optimise the smoke cache
+        uses: ./optimise
+        with:
+          github-token: ${{ github.token }}
+          # Written by the cache smoke test; this repository has no other.
+          key-prefix: bazel-http-smoke-car-v1
+          # The smoke cache holds a single object, so the default window would
+          # never find enough to plan from.
+          min-runs: "1"
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || 'false' }}

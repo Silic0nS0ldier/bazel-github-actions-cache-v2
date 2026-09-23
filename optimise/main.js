@@ -1,0 +1,180 @@
+"use strict";
+
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
+const { input, mask, parseBoolean, safeTemporaryDirectory, setOutput } = require("../action/lib");
+const { resolveBinary } = require("../action/release");
+
+function positiveInteger(name, fallback, maximum = Number.MAX_SAFE_INTEGER) {
+  const value = Number.parseInt(input(name, String(fallback)), 10);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new Error(`${name} must be an integer between 1 and ${maximum}`);
+  }
+  return value;
+}
+
+function fraction(name, fallback) {
+  const value = Number.parseFloat(input(name, String(fallback)));
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(`${name} must be between 0 and 1`);
+  }
+  return value;
+}
+
+function run(binary, args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { stdio: ["ignore", "inherit", "inherit"], env });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        reject(new Error(`the optimiser was killed by ${signal}`));
+        return;
+      }
+      if (code !== 0) {
+        reject(new Error(`the optimiser exited with status ${code}`));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function writeJobSummary(result) {
+  const file = process.env.GITHUB_STEP_SUMMARY;
+  if (!file) {
+    return;
+  }
+  const rows = [
+    ["Usage records read", result.Records],
+    ["Packs before", result.Packs],
+    ["Live entries", result.Entries],
+    ["Packs rebuilt", result.Rebuilt],
+    ["Packs deleted", result.Deleted],
+    ["Wasted bytes per restore", result.WastedBytes],
+    ["Bytes reclaimed", result.ReclaimedBytes],
+    ["Dry run", result.DryRun],
+  ];
+  const table = [
+    "### Bazel cache layout",
+    "",
+    ...(result.Skipped ? [`Nothing to do: ${result.Skipped}.`, ""] : []),
+    "| Measure | Value |",
+    "| --- | --- |",
+    ...rows.map(([label, value]) => `| ${label} | ${value ?? 0} |`),
+    "",
+  ].join(os.EOL);
+  fs.appendFileSync(file, table + os.EOL);
+}
+
+async function main() {
+  if (process.platform !== "linux") {
+    throw new Error("this release supports Linux GitHub Actions runners only");
+  }
+  if (process.env.ACTIONS_CACHE_SERVICE_V2?.toLowerCase() !== "true") {
+    throw new Error("GitHub Actions cache v2 is unavailable (ACTIONS_CACHE_SERVICE_V2 != true)");
+  }
+  if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {
+    throw new Error("GitHub Actions cache v2 credentials are unavailable in this step");
+  }
+
+  const architecture = { x64: "amd64", arm64: "arm64" }[process.arch];
+  if (!architecture) {
+    throw new Error(`unsupported Linux architecture: ${process.arch}`);
+  }
+
+  const githubToken = input("github-token", "");
+  if (!githubToken) {
+    throw new Error("github-token is required; the pass deletes the cache entries it replaces");
+  }
+  mask(githubToken);
+
+  const keyPrefix = input("key-prefix", "bazel-http-v1").trim();
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(keyPrefix)) {
+    throw new Error("key-prefix must match [A-Za-z0-9._-]{1,128}");
+  }
+  const usageArtifact = input("usage-artifact", "bazel-cache-usage").trim();
+  if (!/^[A-Za-z0-9._-]{1,180}$/.test(usageArtifact)) {
+    throw new Error("usage-artifact must match [A-Za-z0-9._-]{1,180}");
+  }
+  const maxRecords = positiveInteger("max-records", 25, 1000);
+  const minRuns = positiveInteger("min-runs", 3, 1000);
+  const packSizeMB = positiveInteger("pack-size-mb", 8, 32);
+  const maxBlobSizeMB = positiveInteger("max-blob-size-mb", 512, 10_240);
+  const backendTimeoutSeconds = positiveInteger("backend-timeout-seconds", 300, 3600);
+  const minWasteFraction = fraction("min-waste-fraction", 0.25);
+  const dryRun = parseBoolean(input("dry-run", "false"), "dry-run");
+  const jobSummary = parseBoolean(input("job-summary", "true"), "job-summary");
+
+  const tempDir = safeTemporaryDirectory(
+    fs.mkdtempSync(path.join(path.resolve(process.env.RUNNER_TEMP), "bazel-gha-optimise-")),
+  );
+  const summaryFile = path.join(tempDir, "summary.json");
+  const spoolDir = path.join(tempDir, "spool");
+
+  const binary = await resolveBinary({
+    program: "cache-optimiser",
+    actionRoot: path.resolve(__dirname, ".."),
+    // Installing under a fixed name keeps every part of the spawned path a
+    // constant, so no release name can influence which program runs.
+    installPath: path.join(tempDir, "cache-optimiser"),
+    repository: process.env.GITHUB_ACTION_REPOSITORY,
+    ref: process.env.GITHUB_ACTION_REF,
+    token: githubToken,
+    toolCacheRoot: path.resolve(
+      process.env.RUNNER_TOOL_CACHE || process.env.RUNNER_TEMP || os.tmpdir(),
+    ),
+    log: (message) => process.stdout.write(`${message}${os.EOL}`),
+  });
+
+  const args = [
+    "--cache-dir",
+    spoolDir,
+    "--key-prefix",
+    keyPrefix,
+    "--usage-artifact",
+    usageArtifact,
+    "--max-records",
+    String(maxRecords),
+    "--min-runs",
+    String(minRuns),
+    "--pack-size",
+    String(packSizeMB * 1024 * 1024),
+    "--min-waste-fraction",
+    String(minWasteFraction),
+    "--max-blob-size",
+    String(maxBlobSizeMB * 1024 * 1024),
+    "--backend-timeout",
+    `${backendTimeoutSeconds}s`,
+    "--summary-file",
+    summaryFile,
+  ];
+  if (dryRun) {
+    args.push("--dry-run");
+  }
+
+  try {
+    // The binary reads its credentials from the environment, so the token has to
+    // arrive that way rather than on a command line other processes can see.
+    await run(binary, args, { ...process.env, GITHUB_TOKEN: githubToken });
+  } finally {
+    // The summary is written even on failure, and is the only record of how far
+    // the pass got.
+    if (fs.existsSync(summaryFile)) {
+      const result = JSON.parse(fs.readFileSync(summaryFile, "utf8"));
+      setOutput("summary", JSON.stringify(result));
+      setOutput("rebuilt", String(result.Rebuilt ?? 0));
+      setOutput("deleted", String(result.Deleted ?? 0));
+      if (jobSummary) {
+        writeJobSummary(result);
+      }
+    }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+main().catch((error) => {
+  process.stdout.write(`::error::${error.message}${os.EOL}`);
+  process.exitCode = 1;
+});
