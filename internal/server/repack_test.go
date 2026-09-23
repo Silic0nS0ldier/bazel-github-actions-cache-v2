@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,6 +77,46 @@ func TestReadLayoutMatchesWhatAServerResolves(t *testing.T) {
 	for _, entry := range layout.Entries {
 		if got := reader.packFor(entry.Kind, entry.Digest); got != entry.Pack {
 			t.Fatalf("layout puts %s in %s, the server reads it from %s", entry.Digest, entry.Pack, got)
+		}
+	}
+}
+
+// The REST listing reports entries this job's cache scope cannot restore, so a
+// layout has to be buildable from the part that is visible.
+func TestReadLayoutSkipsManifestsItCannotRestore(t *testing.T) {
+	backend := newMemoryBackend()
+	blob := []byte("an output this job can see")
+	seedPacked(t, backend, blob)
+
+	phantomPack := strings.Repeat("f", 64)
+	// A real manifest ID, so the key parses and the load is what fails.
+	realManifest := readLayout(t, backend).Manifests[0].ID
+	phantomManifest := manifestKeyFor("test-v1", phantomPack, realManifest)
+	layout, err := ReadLayout(context.Background(), LayoutOptions{
+		Backend: backend,
+		Catalog: phantomCatalog{
+			memoryCatalog{backend: backend},
+			[]string{packKeyFor("test-v1", phantomPack), phantomManifest},
+		},
+		KeyPrefix:   "test-v1",
+		MaxBlobSize: 1 << 20,
+		Timeout:     5 * time.Second,
+		Warn:        func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout.UnreadableManifests != 1 {
+		t.Fatalf("unreadable = %d, want 1", layout.UnreadableManifests)
+	}
+	if len(layout.Entries) != 1 || layout.Entries[0].Digest != digest(blob) {
+		t.Fatalf("entries = %+v", layout.Entries)
+	}
+	// The pack behind an unreadable manifest must not become a deletion
+	// candidate, so it must not appear in the layout at all.
+	for _, pack := range layout.Packs {
+		if pack.ID == phantomPack {
+			t.Fatal("a pack whose manifest could not be read entered the layout")
 		}
 	}
 }

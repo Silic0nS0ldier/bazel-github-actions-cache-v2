@@ -41,6 +41,9 @@ type Result struct {
 	ReclaimedBytes int64
 	WastedBytes    int64
 	DryRun         bool
+	// Unreadable counts manifests the listing reported but this job could not
+	// restore, so a plan that saw few of them can be recognised as such.
+	Unreadable int
 	// Skipped explains why a pass did no work. A quiet repository is not a
 	// failure, and a scheduled pass must not go red for having nothing to do.
 	Skipped string
@@ -68,8 +71,8 @@ func Run(ctx context.Context, options RunOptions) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("read the stored layout: %w", err)
 	}
-	options.Log("layout has %d packs, %d live entries, %d orphaned packs, %d orphaned manifests",
-		len(layout.Packs), len(layout.Entries), layout.OrphanPacks, layout.OrphanManifests)
+	options.Log("layout has %d packs, %d live entries, %d orphaned packs, %d orphaned manifests, %d manifests this job cannot restore",
+		len(layout.Packs), len(layout.Entries), layout.OrphanPacks, layout.OrphanManifests, layout.UnreadableManifests)
 
 	demand := NewDemand()
 	records, err := options.Records.Collect(ctx, demand, options.MaxRecords, options.Log)
@@ -78,10 +81,11 @@ func Run(ctx context.Context, options RunOptions) (Result, error) {
 	}
 
 	result := Result{
-		Records: records,
-		Packs:   len(layout.Packs),
-		Entries: len(layout.Entries),
-		DryRun:  options.DryRun,
+		Records:    records,
+		Packs:      len(layout.Packs),
+		Entries:    len(layout.Entries),
+		Unreadable: layout.UnreadableManifests,
+		DryRun:     options.DryRun,
 	}
 	plan, err := NewPlan(layout, demand, options.Plan)
 	if errors.Is(err, errTooFewRuns) {

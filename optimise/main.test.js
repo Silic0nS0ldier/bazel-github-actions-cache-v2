@@ -39,8 +39,12 @@ function runWrapper(t, inputs) {
 
   const result = spawnSync(process.execPath, [path.join(__dirname, "main.js")], {
     encoding: "utf8",
+    // Deliberately not inheriting the environment: on a runner the ambient
+    // GITHUB_* variables describe the job running the test, and the wrapper
+    // would read them as its own context.
     env: {
-      ...process.env,
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
       STUB_ARGS_FILE: argsFile,
       RUNNER_TEMP: runnerTemp,
       RUNNER_TOOL_CACHE: path.join(runnerTemp, "tools"),
@@ -115,4 +119,35 @@ test("an input outside its range stops the pass", (t) => {
 
   assert.equal(run.result.status, 1);
   assert.match(run.result.stdout, /min-waste-fraction must be between 0 and 1/);
+});
+
+// Deleting spans every ref, but a replacement published from a branch is only
+// visible to that branch.
+test("applying from a branch other than the default is refused", (t) => {
+  const eventFile = path.join(os.tmpdir(), `optimise-event-${process.pid}.json`);
+  fs.writeFileSync(eventFile, JSON.stringify({ repository: { default_branch: "main" } }));
+  t.after(() => fs.rmSync(eventFile, { force: true }));
+
+  const applying = runWrapper(t, {
+    "INPUT_DRY-RUN": "false",
+    GITHUB_EVENT_PATH: eventFile,
+    GITHUB_REF_NAME: "some-feature",
+  });
+  if (!applying) return;
+  assert.equal(applying.result.status, 1);
+  assert.match(applying.result.stdout, /refusing to apply from some-feature/);
+});
+
+test("planning from a branch is allowed, since it deletes nothing", (t) => {
+  const eventFile = path.join(os.tmpdir(), `optimise-event-dry-${process.pid}.json`);
+  fs.writeFileSync(eventFile, JSON.stringify({ repository: { default_branch: "main" } }));
+  t.after(() => fs.rmSync(eventFile, { force: true }));
+
+  const run = runWrapper(t, {
+    "INPUT_DRY-RUN": "true",
+    GITHUB_EVENT_PATH: eventFile,
+    GITHUB_REF_NAME: "some-feature",
+  });
+  if (!run) return;
+  assert.equal(run.result.status, 0, run.result.stdout + run.result.stderr);
 });
