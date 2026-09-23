@@ -91,24 +91,29 @@ func (a *assetService) FetchBlob(
 	}
 	s := a.server
 	s.stats.requests.Add(1)
+	s.stats.assetRequests.Add(1)
 	uris := request.GetUris()
 
 	checksum, err := parseChecksum(request.GetQualifiers())
 	if err != nil {
+		s.stats.assetRejected.Add(1)
 		return fetchFailure(uris, err), nil
 	}
 	headers, err := parseAssetHeaders(request.GetQualifiers(), len(uris))
 	if err != nil {
+		s.stats.assetRejected.Add(1)
 		return fetchFailure(uris, err), nil
 	}
 	// Bazel sets this to a future timestamp when a repository rule declares no
 	// checksum, precisely to forbid cached content. Nothing here records when an
 	// asset was fetched, so the honest answer is always a miss.
 	if request.HasOldestContentAccepted() {
+		s.stats.assetRejected.Add(1)
 		return fetchFailure(uris, errors.New("this cache cannot attest to when content was fetched")), nil
 	}
 
 	if reference, found := s.cachedAsset(ctx, checksum); found {
+		s.stats.assetHits.Add(1)
 		return fetchSuccess("", reference), nil
 	}
 	uri, reference, err := s.fetchAsset(ctx, uris, checksum, headers)

@@ -26,7 +26,10 @@ type Stats struct {
 	SkippedActionResultUploads uint64 `json:"skipped_action_result_uploads"`
 	BytesServed                uint64 `json:"bytes_served"`
 	BytesReceived              uint64 `json:"bytes_received"`
+	AssetRequests              uint64 `json:"asset_requests"`
+	AssetHits                  uint64 `json:"asset_hits"`
 	AssetDownloads             uint64 `json:"asset_downloads"`
+	AssetRejected              uint64 `json:"asset_rejected"`
 	AssetFetchErrors           uint64 `json:"asset_fetch_errors"`
 	ThrottleWaits              uint64 `json:"throttle_waits"`
 	PackUploads                uint64 `json:"pack_uploads"`
@@ -68,7 +71,10 @@ type counters struct {
 	skippedActionResultUploads atomic.Uint64
 	bytesServed                atomic.Uint64
 	bytesReceived              atomic.Uint64
+	assetRequests              atomic.Uint64
+	assetHits                  atomic.Uint64
 	assetDownloads             atomic.Uint64
+	assetRejected              atomic.Uint64
 	assetFetchErrors           atomic.Uint64
 	throttleWaits              atomic.Uint64
 	packUploads                atomic.Uint64
@@ -108,7 +114,10 @@ func (c *counters) snapshot() Stats {
 		SkippedActionResultUploads: c.skippedActionResultUploads.Load(),
 		BytesServed:                c.bytesServed.Load(),
 		BytesReceived:              c.bytesReceived.Load(),
+		AssetRequests:              c.assetRequests.Load(),
+		AssetHits:                  c.assetHits.Load(),
 		AssetDownloads:             c.assetDownloads.Load(),
+		AssetRejected:              c.assetRejected.Load(),
 		AssetFetchErrors:           c.assetFetchErrors.Load(),
 		ThrottleWaits:              c.throttleWaits.Load(),
 		PackUploads:                c.packUploads.Load(),

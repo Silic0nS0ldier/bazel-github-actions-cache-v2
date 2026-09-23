@@ -137,6 +137,12 @@ func TestFetchBlobFetchesAndPublishesOnMiss(t *testing.T) {
 	if requests.Load() != 1 {
 		t.Fatalf("origin was contacted %d times, want 1", requests.Load())
 	}
+	// A hit costs no download, so without its own counter it leaves no trace at
+	// all and a busy cache is indistinguishable from an unused one.
+	stats := server.Snapshot()
+	if stats.AssetRequests != 2 || stats.AssetHits != 1 || stats.AssetDownloads != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
 }
 
 func TestFetchBlobRejectsContentThatFailsItsChecksum(t *testing.T) {
