@@ -240,8 +240,10 @@ whether it was downloaded or only presence-checked:
     {"kind": "cas", "digest": "…", "pack": "…", "size": 4096,
      "presence_checks": 1, "downloads": 1}
   ],
-  "packs": [{"id": "…", "size": 8388608, "bytes_used": 4096, "restored": true}],
+  "packs": [{"id": "…", "size": 8388608, "declared_bytes": 9437184,
+             "bytes_used": 4096, "restored": true}],
   "pack_bytes_restored": 8388608,
+  "pack_bytes_declared": 9437184,
   "pack_bytes_used": 4096
 }
 ```
@@ -255,10 +257,12 @@ ever presence-checked: they still have to exist, or the action result referencin
 them becomes a miss, but nothing needs their bytes. An entry with no presence
 checks and no downloads is the only kind nothing depends on.
 
-`pack_bytes_restored` against `pack_bytes_used` is the headline number for
-`packs` mode. It is the share of downloaded pack bytes a job turned out to want,
-so a low ratio means packs are placing frequently and rarely fetched content
-together. Both appear in the final statistics.
+`pack_bytes_used` against `pack_bytes_declared` is the headline number for
+`packs` mode. It is the share of a restored pack's content a job turned out to
+want, so a low ratio means packs are placing frequently and rarely fetched
+content together. `pack_bytes_restored` is what the transfers actually cost;
+because blocks are compressed it is not comparable with either of the other two,
+and a ratio built on it can exceed 1. All three appear in the final statistics.
 
 To keep the record, nothing is required. Set `usage-artifact` to an empty string
 to opt out, or to a distinct name per instance if one job runs this action more

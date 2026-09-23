@@ -35,21 +35,29 @@ func (e UsageEntry) Access() string {
 }
 
 // UsagePack describes how much of a restored pack a job turned out to need.
+// Size is what the transfer cost; DeclaredBytes is the uncompressed content it
+// holds, and is the only one of the two comparable with BytesUsed.
 type UsagePack struct {
-	ID        string `json:"id"`
-	Size      int64  `json:"size"`
-	BytesUsed int64  `json:"bytes_used"`
-	Restored  bool   `json:"restored"`
+	ID            string `json:"id"`
+	Size          int64  `json:"size"`
+	DeclaredBytes int64  `json:"declared_bytes"`
+	BytesUsed     int64  `json:"bytes_used"`
+	Restored      bool   `json:"restored"`
 }
 
 // UsageReport is the record an optimisation pass consumes. It is deliberately
 // about what was used rather than what exists: pack composition can be read back
 // from the manifests, but only a job knows which entries it needed.
 type UsageReport struct {
-	Entries           []UsageEntry `json:"entries"`
-	Packs             []UsagePack  `json:"packs"`
-	PackBytesRestored int64        `json:"pack_bytes_restored"`
-	PackBytesUsed     int64        `json:"pack_bytes_used"`
+	Entries []UsageEntry `json:"entries"`
+	Packs   []UsagePack  `json:"packs"`
+	// PackBytesRestored is what the transfers cost, so it is compressed and is
+	// not comparable with PackBytesUsed.
+	PackBytesRestored int64 `json:"pack_bytes_restored"`
+	// PackBytesDeclared is the uncompressed content those packs hold. Yield is
+	// PackBytesUsed over this.
+	PackBytesDeclared int64 `json:"pack_bytes_declared"`
+	PackBytesUsed     int64 `json:"pack_bytes_used"`
 }
 
 func (r UsageReport) JSON() []byte {
@@ -60,13 +68,18 @@ func (r UsageReport) JSON() []byte {
 type usageRecorder struct {
 	mu       sync.Mutex
 	entries  map[string]*UsageEntry
-	restored map[string]int64
+	restored map[string]restoredPack
+}
+
+type restoredPack struct {
+	stored   int64
+	declared int64
 }
 
 func newUsageRecorder() *usageRecorder {
 	return &usageRecorder{
 		entries:  make(map[string]*UsageEntry),
-		restored: make(map[string]int64),
+		restored: make(map[string]restoredPack),
 	}
 }
 
@@ -100,10 +113,10 @@ func (r *usageRecorder) record(kind, digest, pack, access string, size int64) {
 // packRestored notes that a pack was paid for. The bytes it cost are compared
 // against the bytes that turned out to be wanted, which is the ratio that says
 // whether packing is placing hot and cold content together.
-func (r *usageRecorder) packRestored(pack string, size int64) {
+func (r *usageRecorder) packRestored(pack string, stored, declared int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.restored[pack] = size
+	r.restored[pack] = restoredPack{stored: stored, declared: declared}
 }
 
 func (r *usageRecorder) report() UsageReport {
@@ -128,14 +141,16 @@ func (r *usageRecorder) report() UsageReport {
 			used[copied.Pack] += *copied.Size
 		}
 	}
-	for pack, size := range r.restored {
+	for pack, sizes := range r.restored {
 		report.Packs = append(report.Packs, UsagePack{
-			ID:        pack,
-			Size:      size,
-			BytesUsed: used[pack],
-			Restored:  true,
+			ID:            pack,
+			Size:          sizes.stored,
+			DeclaredBytes: sizes.declared,
+			BytesUsed:     used[pack],
+			Restored:      true,
 		})
-		report.PackBytesRestored += size
+		report.PackBytesRestored += sizes.stored
+		report.PackBytesDeclared += sizes.declared
 		report.PackBytesUsed += used[pack]
 	}
 

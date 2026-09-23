@@ -117,9 +117,15 @@ func TestUsageReportsPackYield(t *testing.T) {
 	if report.PackBytesUsed != hotReference.size {
 		t.Fatalf("bytes used = %d, want %d", report.PackBytesUsed, hotReference.size)
 	}
-	if report.PackBytesRestored <= report.PackBytesUsed {
-		t.Fatalf("restored %d bytes to use %d; the yield should be below 1",
-			report.PackBytesRestored, report.PackBytesUsed)
+	// Yield is used over declared. A restored total is compressed, so comparing
+	// against it can exceed 1 and say nothing.
+	if report.PackBytesDeclared != hotReference.size+coldReference.size {
+		t.Fatalf("declared = %d, want the two blobs' %d",
+			report.PackBytesDeclared, hotReference.size+coldReference.size)
+	}
+	if report.PackBytesUsed >= report.PackBytesDeclared {
+		t.Fatalf("used %d of %d declared; the yield should be below 1",
+			report.PackBytesUsed, report.PackBytesDeclared)
 	}
 	if pack := usageFor(t, report, "cas", hotReference.hash).Pack; pack != report.Packs[0].ID {
 		t.Fatalf("entry pack = %q, want %q", pack, report.Packs[0].ID)

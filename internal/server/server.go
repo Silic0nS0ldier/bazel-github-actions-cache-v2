@@ -206,6 +206,7 @@ func (s *Server) Snapshot() Stats {
 	// frequently and rarely fetched content together.
 	report := s.usage.report()
 	stats.PackBytesRestored = uint64(report.PackBytesRestored)
+	stats.PackBytesDeclared = uint64(report.PackBytesDeclared)
 	stats.PackBytesUsed = uint64(report.PackBytesUsed)
 	return stats
 }
