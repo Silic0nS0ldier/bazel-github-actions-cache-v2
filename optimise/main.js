@@ -30,6 +30,25 @@ function fraction(name, fallback) {
   return value;
 }
 
+// Fractions are allowed so that a test can ask for a threshold shorter than an
+// hour. Anything that short cannot tell a lost pack from one a running job is
+// still publishing, so it warns.
+function reapAge(name, fallback, maximumHours) {
+  const hours = Number.parseFloat(input(name, String(fallback)));
+  if (!Number.isFinite(hours) || hours <= 0 || hours > maximumHours) {
+    throw new Error(
+      `${name} must be greater than 0 and at most ${maximumHours}; fractions of an hour are allowed`,
+    );
+  }
+  if (hours < 1) {
+    process.stdout.write(
+      `::warning::${name} is under an hour, so a pack a running job has published but not yet ` +
+        `committed a manifest for can be reaped; use this for testing only${os.EOL}`,
+    );
+  }
+  return Math.max(1, Math.round(hours * 3600));
+}
+
 function run(binary, args, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, { stdio: ["ignore", "inherit", "inherit"], env });
@@ -136,7 +155,7 @@ async function main() {
     throw new Error("max-new-mb must be a non-negative integer");
   }
   const reap = parseBoolean(input("reap-unmanifested-packs", "false"), "reap-unmanifested-packs");
-  const reapOlderThanHours = positiveInteger("reap-older-than-hours", 24, 8760);
+  const reapOlderThanSeconds = reapAge("reap-older-than-hours", 24, 8760);
   const backendTimeoutSeconds = positiveInteger("backend-timeout-seconds", 300, 3600);
   const minWasteFraction = fraction("min-waste-fraction", 0.25);
   const dryRun = parseBoolean(input("dry-run", "false"), "dry-run");
@@ -189,7 +208,7 @@ async function main() {
     "--max-new-bytes",
     String(maxNewMB * 1024 * 1024),
     "--reap-older-than",
-    `${reapOlderThanHours}h`,
+    `${reapOlderThanSeconds}s`,
     "--backend-timeout",
     `${backendTimeoutSeconds}s`,
     "--summary-file",

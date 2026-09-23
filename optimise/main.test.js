@@ -24,14 +24,19 @@ fs.writeFileSync(args[at + 1], JSON.stringify({ Records: 4, Rebuilt: 0, Deleted:
 function runWrapper(t, inputs) {
   const distBinary = path.join(repoRoot, "dist", asset);
   if (fs.existsSync(distBinary)) {
-    // A real build is present, so the wrapper would run the actual optimiser
-    // against a live cache rather than the stub.
-    t.skip(`dist/${asset} exists; run this before scripts/build-dist.sh`);
-    return null;
+    // Reusing our own stub matters: a test that calls this twice would
+    // otherwise see the stub it just wrote and skip itself.
+    if (fs.readFileSync(distBinary, "utf8") !== STUB) {
+      // A real build is present, so the wrapper would run the actual optimiser
+      // against a live cache rather than the stub.
+      t.skip(`dist/${asset} exists; run this before scripts/build-dist.sh`);
+      return null;
+    }
+  } else {
+    fs.mkdirSync(path.dirname(distBinary), { recursive: true });
+    fs.writeFileSync(distBinary, STUB, { mode: 0o755 });
+    t.after(() => fs.rmSync(distBinary, { force: true }));
   }
-  fs.mkdirSync(path.dirname(distBinary), { recursive: true });
-  fs.writeFileSync(distBinary, STUB, { mode: 0o755 });
-  t.after(() => fs.rmSync(distBinary, { force: true }));
 
   const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), "optimise-wrapper-"));
   t.after(() => fs.rmSync(runnerTemp, { recursive: true, force: true }));
@@ -112,7 +117,32 @@ test("reaping passes its age threshold through", (t) => {
   assert.equal(run.result.status, 0, run.result.stdout + run.result.stderr);
   const args = JSON.parse(fs.readFileSync(run.argsFile, "utf8"));
   assert.ok(args.includes("--reap"));
-  assert.equal(args[args.indexOf("--reap-older-than") + 1], "48h");
+  assert.equal(args[args.indexOf("--reap-older-than") + 1], `${48 * 3600}s`);
+});
+
+// Testing the reaper needs a threshold shorter than an hour, which is too short
+// to tell a lost pack from one a running job is still publishing.
+test("a sub-hour age threshold is allowed but warned about", (t) => {
+  const run = runWrapper(t, {
+    "INPUT_DRY-RUN": "true",
+    "INPUT_REAP-UNMANIFESTED-PACKS": "true",
+    "INPUT_REAP-OLDER-THAN-HOURS": "0.25",
+  });
+  if (!run) return;
+
+  assert.equal(run.result.status, 0, run.result.stdout + run.result.stderr);
+  const args = JSON.parse(fs.readFileSync(run.argsFile, "utf8"));
+  assert.equal(args[args.indexOf("--reap-older-than") + 1], "900s");
+  assert.match(run.result.stdout, /::warning::reap-older-than-hours is under an hour/);
+});
+
+test("an age threshold of zero or less is refused", (t) => {
+  for (const hours of ["0", "-1"]) {
+    const run = runWrapper(t, { "INPUT_REAP-OLDER-THAN-HOURS": hours });
+    if (!run) return;
+    assert.equal(run.result.status, 1);
+    assert.match(run.result.stdout, /reap-older-than-hours must be greater than 0/);
+  }
 });
 
 test("the publish budget and upload rate reach the binary", (t) => {
