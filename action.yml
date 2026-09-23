@@ -77,6 +77,10 @@ inputs:
     description: "Publish the cache usage record as a job artifact during cleanup; set to an empty string to disable"
     required: false
     default: bazel-cache-usage
+  asset-header-routes:
+    description: "Newline-separated https URI patterns, such as https://ghcr.io/v2/acme/*, whose credentials the remote downloader may forward to the origin. Empty refuses every one, leaving authenticated assets to Bazel rather than caching them where the whole repository can read them"
+    required: false
+    default: ""
 outputs:
   url:
     description: "Loopback Bazel HTTP remote-cache URL"

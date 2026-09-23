@@ -63,6 +63,10 @@ type Config struct {
 	// AssetClient fetches remote assets from their origin. A nil client gets a
 	// default that refuses to be redirected off HTTPS.
 	AssetClient *http.Client
+	// AssetHeaderRoutes are the URI patterns whose credentials may be forwarded
+	// to an origin. Empty refuses every one of them, so an authenticated asset
+	// is left to Bazel rather than cached where the whole repository reads it.
+	AssetHeaderRoutes []string
 }
 
 type object struct {
@@ -87,6 +91,7 @@ type Server struct {
 	limiter        *intervalLimiter
 	packs          *packStore
 	usage          *usageRecorder
+	assetRoutes    []assetRoute
 }
 
 func New(cfg Config) (*Server, error) {
@@ -146,17 +151,22 @@ func New(cfg Config) (*Server, error) {
 	if cfg.AssetClient == nil {
 		cfg.AssetClient = defaultAssetClient()
 	}
+	assetRoutes, err := ParseAssetRoutes(cfg.AssetHeaderRoutes)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(cfg.CacheDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create cache directory: %w", err)
 	}
 	server := &Server{
-		cfg:        cfg,
-		objects:    make(map[string]object),
-		published:  make(map[string]struct{}),
-		publishing: make(map[string]*publication),
-		sem:        make(chan struct{}, cfg.MaxConcurrent),
-		limiter:    newIntervalLimiter(cfg.UploadsPerMinute),
-		usage:      newUsageRecorder(),
+		cfg:         cfg,
+		objects:     make(map[string]object),
+		published:   make(map[string]struct{}),
+		publishing:  make(map[string]*publication),
+		sem:         make(chan struct{}, cfg.MaxConcurrent),
+		limiter:     newIntervalLimiter(cfg.UploadsPerMinute),
+		usage:       newUsageRecorder(),
+		assetRoutes: assetRoutes,
 	}
 	server.cfg.Backend = &countingBackend{
 		backend: cfg.Backend,

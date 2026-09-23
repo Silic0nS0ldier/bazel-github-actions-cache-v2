@@ -61,6 +61,7 @@ func run() error {
 		readyFile        = flag.String("ready-file", "", "write startup metadata to this file")
 		statsFile        = flag.String("stats-file", "", "write final statistics to this file")
 		usageArtifact    = flag.String("usage-artifact", "", "publish the usage record as a job artifact with this name; empty disables it")
+		assetRoutes      = flag.String("asset-header-routes", "", "newline-separated https URI patterns whose credentials may be forwarded to an origin")
 		showVersion      = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -132,6 +133,7 @@ func run() error {
 		UploadsPerMinute:     *uploadsPerMinute,
 		BackendTimeout:       *backendTimeout,
 		ShutdownToken:        os.Getenv("BAZEL_GHA_CACHE_SHUTDOWN_TOKEN"),
+		AssetHeaderRoutes:    []string{*assetRoutes},
 		Shutdown:             requestShutdown,
 		Logger:               logger,
 	})
