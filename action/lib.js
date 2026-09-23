@@ -111,10 +111,44 @@ function safeTemporaryDirectory(candidate) {
   return resolved;
 }
 
+const BYTE_UNITS = [
+  ["TiB", 1024 ** 4],
+  ["GiB", 1024 ** 3],
+  ["MiB", 1024 ** 2],
+  ["KiB", 1024],
+  ["B", 1],
+];
+
+// formatCount groups digits so a long number can be read at a glance. The
+// locale is fixed so a job summary does not depend on the runner's.
+function formatCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  return number.toLocaleString("en-US");
+}
+
+// formatBytes renders a size in the largest unit that fits, as "2.32GiB".
+// Trailing zeros are dropped so a round number stays short.
+function formatBytes(value) {
+  const total = Number(value);
+  if (!Number.isFinite(total)) return String(value);
+  if (total < 0) return `-${formatBytes(-total)}`;
+  for (const [unit, size] of BYTE_UNITS) {
+    // Bytes are the floor, so anything under a kibibyte lands there.
+    if (total < size && size > 1) continue;
+    const scaled = (total / size).toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+    const [integer, fraction] = scaled.split(".");
+    return `${formatCount(integer)}${fraction ? `.${fraction}` : ""}${unit}`;
+  }
+  return "0B";
+}
+
 module.exports = {
   appendCommand,
   booleanFlag,
   eventPayload,
+  formatBytes,
+  formatCount,
   input,
   isForkPullRequest,
   mask,

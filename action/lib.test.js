@@ -7,6 +7,8 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   appendCommand,
+  formatBytes,
+  formatCount,
   booleanFlag,
   isForkPullRequest,
   resolveWriteMode,
@@ -59,4 +61,24 @@ test("Go boolean flags use equals syntax", () => {
   assert.equal(booleanFlag("write-enabled", true), "--write-enabled=true");
   assert.equal(booleanFlag("fail-open", false), "--fail-open=false");
   assert.throws(() => booleanFlag("unsafe flag", true));
+});
+
+test("byte sizes use the largest unit that fits", () => {
+  assert.equal(formatBytes(0), "0B");
+  assert.equal(formatBytes(12), "12B");
+  assert.equal(formatBytes(1023), "1,023B");
+  assert.equal(formatBytes(1024), "1KiB");
+  assert.equal(formatBytes(2491416576), "2.32GiB");
+  assert.equal(formatBytes(241432494), "230.248MiB");
+  assert.equal(formatBytes(1024 ** 4 * 3), "3TiB");
+  // Trailing zeros go, so a round size stays short.
+  assert.equal(formatBytes(2 * 1024 ** 2), "2MiB");
+  assert.equal(formatBytes(-1024), "-1KiB");
+});
+
+test("long counts are grouped so they can be read", () => {
+  assert.equal(formatCount(0), "0");
+  assert.equal(formatCount(999), "999");
+  assert.equal(formatCount(999999), "999,999");
+  assert.equal(formatCount(1000000), "1,000,000");
 });

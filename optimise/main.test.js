@@ -18,7 +18,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.writeFileSync(process.env.STUB_ARGS_FILE, JSON.stringify(args));
 const at = args.indexOf("--summary-file");
-fs.writeFileSync(args[at + 1], JSON.stringify({ Records: 4, Rebuilt: 0, Deleted: 0, DryRun: true }));
+fs.writeFileSync(args[at + 1], JSON.stringify({ Records: 4, Rebuilt: 0, Deleted: 0, DryRun: true, Entries: 169396, WastedBytes: 1610612736 }));
 `;
 
 function runWrapper(t, inputs) {
@@ -175,6 +175,11 @@ test("the result reaches the job summary and the step outputs", (t) => {
   assert.equal(run.result.status, 0, run.result.stdout + run.result.stderr);
   const summary = fs.readFileSync(path.join(run.runnerTemp, "summary.md"), "utf8");
   assert.match(summary, /Usage records read \| 4/);
+  // Sizes are for people to read, so they use the largest unit that fits
+  // rather than a raw byte count.
+  assert.match(summary, /Wasted per restore \| 1\.5GiB/);
+  assert.match(summary, /Live entries \| 169,396/);
+  assert.match(summary, /Dry run \| yes/);
   const outputs = fs.readFileSync(path.join(run.runnerTemp, "output"), "utf8");
   assert.match(outputs, /^rebuilt=0$/m);
   assert.match(outputs, /^deleted=0$/m);

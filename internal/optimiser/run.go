@@ -96,9 +96,10 @@ func Run(ctx context.Context, options RunOptions) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("read the stored layout: %w", err)
 	}
-	options.Log("layout has %d packs, %d live entries, %d orphaned packs (%d named by no manifest), %d orphaned manifests, %d manifests this job cannot restore",
-		len(layout.Packs), len(layout.Entries), layout.OrphanPacks, len(layout.UnmanifestedPacks),
-		layout.OrphanManifests, layout.UnreadableManifests)
+	options.Log("layout has %s packs, %s live entries, %s orphaned packs (%s named by no manifest), %s orphaned manifests, %s manifests this job cannot restore",
+		HumanCount(int64(len(layout.Packs))), HumanCount(int64(len(layout.Entries))),
+		HumanCount(int64(layout.OrphanPacks)), HumanCount(int64(len(layout.UnmanifestedPacks))),
+		HumanCount(int64(layout.OrphanManifests)), HumanCount(int64(layout.UnreadableManifests)))
 
 	demand := NewDemand()
 	records, err := options.Records.Collect(ctx, demand, options.MaxRecords, options.Log)
@@ -146,8 +147,8 @@ func Run(ctx context.Context, options RunOptions) (Result, error) {
 		options.Log("%s; nothing to do", result.Skipped)
 		return result, nil
 	}
-	options.Log("rebuilding %d packs into %d, deleting %d empty ones; %d wasted bytes per restore, %d bytes reclaimed",
-		len(plan.Rewrite), len(plan.Groups), len(plan.Dead), plan.WastedBytes, plan.ReclaimedBytes)
+	options.Log("rebuilding %d packs into %d, deleting %d empty ones; %s wasted per restore, %s reclaimed",
+		len(plan.Rewrite), len(plan.Groups), len(plan.Dead), HumanBytes(plan.WastedBytes), HumanBytes(plan.ReclaimedBytes))
 	if options.DryRun {
 		return result, nil
 	}
@@ -191,8 +192,8 @@ func Run(ctx context.Context, options RunOptions) (Result, error) {
 		if options.MaxNewBytes > 0 && newBytes >= options.MaxNewBytes {
 			// Stopping early is safe: the packs still to be rebuilt were never
 			// touched, so they keep serving. The next pass re-plans.
-			options.Log("stopping after %d of %d packs, having published %d bytes this pass",
-				index, len(plan.Groups), newBytes)
+			options.Log("stopping after %d of %d packs, having published %s this pass",
+				index, len(plan.Groups), HumanBytes(newBytes))
 			result.Incomplete = true
 			break
 		}

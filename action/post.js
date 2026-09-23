@@ -1,7 +1,13 @@
 "use strict";
 
 const fs = require("node:fs");
-const { request, safeTemporaryDirectory, setOutput } = require("./lib");
+const {
+  formatBytes,
+  formatCount,
+  request,
+  safeTemporaryDirectory,
+  setOutput,
+} = require("./lib");
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -12,6 +18,108 @@ function processExists(pid) {
   } catch {
     return false;
   }
+}
+
+// buildSummary is separated from the post step so the rendered tables can
+// be tested without standing a server up.
+function buildSummary(stats) {
+  const count = (name) => formatCount(stats[name] ?? 0);
+  const bytes = (name) => formatBytes(stats[name] ?? 0);
+  const declared = Number(stats.pack_bytes_declared ?? 0);
+  const packed = ["packs_discovered", "pack_downloads", "pack_uploads"].some(
+    (name) => Number(stats[name] ?? 0) > 0,
+  );
+  // Collapsing the detail hides an error count behind a click, so the total
+  // is surfaced here: a non-zero value is the cue to expand.
+  const failures = [
+    "backend_load_errors",
+    "backend_save_errors",
+    "manifest_discovery_errors",
+    "manifest_load_errors",
+    "asset_fetch_errors",
+  ].reduce((total, name) => total + Number(stats[name] ?? 0), 0);
+
+  const headline = [
+    ["Hits", count("hits")],
+    ["Misses", count("misses")],
+    ["Published uploads", count("uploads")],
+    ...(packed
+      ? [
+          ["CARv2 pack downloads", count("pack_downloads")],
+          ["Pack bytes transferred", bytes("pack_bytes_restored")],
+          // Used over declared, since a transferred total is compressed and
+          // so is not comparable with either.
+          [
+            "Pack yield",
+            declared > 0
+              ? `${((100 * Number(stats.pack_bytes_used ?? 0)) / declared).toFixed(1)}%`
+              : "n/a",
+          ],
+        ]
+      : []),
+    ["Served", bytes("bytes_served")],
+    ["Received", bytes("bytes_received")],
+    ["Errors", formatCount(failures)],
+  ];
+
+  // Everything the JSON carries that is not in the headline, so expanding
+  // always answers the question rather than sending you to the raw output.
+  const detail = [
+    ["Requests", count("requests")],
+    ["Operations", count("operations")],
+    ["Rejected requests", count("rejected_requests")],
+    ["Deduplicated uploads", count("deduplicated_uploads")],
+    ["Read-only discarded uploads", count("discarded_uploads")],
+    ["Upload throttle waits", count("throttle_waits")],
+    ["CARv2 pack uploads", count("pack_uploads")],
+    ["Manifest uploads", count("manifest_uploads")],
+    ["Pack retention renewals", count("pack_renewals")],
+    ["Unavailable packs skipped", count("pack_loads_skipped")],
+    ["Compressed blocks", count("compressed_blocks")],
+    ["Saved by compression", bytes("compression_saved_bytes")],
+    ["Packs discovered", count("packs_discovered")],
+    ["Manifests discovered", count("manifests_discovered")],
+    ["Manifests skipped", count("manifests_skipped")],
+    ["Orphaned manifests", count("manifests_orphaned")],
+    ["Manifest discovery errors", count("manifest_discovery_errors")],
+    ["Manifest load errors", count("manifest_load_errors")],
+    ["Action-digest conflicts", count("action_digest_conflicts")],
+    ["Validated action results", count("validated_action_results")],
+    ["Incomplete action results", count("incomplete_action_results")],
+    ["Invalid action results", count("invalid_action_results")],
+    ["Skipped action-result uploads", count("skipped_action_result_uploads")],
+    ["Asset downloads", count("asset_downloads")],
+    ["Asset fetch errors", count("asset_fetch_errors")],
+    ["Backend requests", count("backend_requests")],
+    ["Backend downloads", count("backend_downloads")],
+    ["Backend existence checks", count("backend_existence_checks")],
+    ["Backend load errors", count("backend_load_errors")],
+    ["Backend save errors", count("backend_save_errors")],
+    ["Pack content restored", bytes("pack_bytes_declared")],
+    ["Pack content used", bytes("pack_bytes_used")],
+    ...(packed ? [] : [["Pack bytes transferred", bytes("pack_bytes_restored")]]),
+  ];
+
+  const table = (rows) => [
+    "| Metric | Value |",
+    "|---|---:|",
+    ...rows.map(([label, value]) => `| ${label} | ${value} |`),
+  ];
+  const summary = [
+    "### Bazel GitHub Actions cache v2",
+    "",
+    ...table(headline),
+    "",
+    "<details>",
+    "<summary>All statistics</summary>",
+    // A table needs a blank line after the summary tag to render at all.
+    "",
+    ...table(detail),
+    "",
+    "</details>",
+    "",
+  ].join("\n");
+  return summary;
 }
 
 async function post() {
@@ -63,40 +171,7 @@ async function post() {
     }
   }
   if (process.env.GITHUB_STEP_SUMMARY) {
-    const summary = [
-      "### Bazel GitHub Actions cache v2",
-      "",
-      "| Metric | Value |",
-      "|---|---:|",
-      `| Hits | ${stats.hits ?? 0} |`,
-      `| Misses | ${stats.misses ?? 0} |`,
-      `| Published uploads | ${stats.uploads ?? 0} |`,
-      `| CARv2 pack uploads | ${stats.pack_uploads ?? 0} |`,
-      `| Manifest uploads | ${stats.manifest_uploads ?? 0} |`,
-      `| CARv2 pack downloads | ${stats.pack_downloads ?? 0} |`,
-      `| Pack retention renewals | ${stats.pack_renewals ?? 0} |`,
-      `| Compressed blocks | ${stats.compressed_blocks ?? 0} |`,
-      `| Bytes saved by compression | ${stats.compression_saved_bytes ?? 0} |`,
-      `| Unavailable packs skipped | ${stats.pack_loads_skipped ?? 0} |`,
-      `| Packs discovered | ${stats.packs_discovered ?? 0} |`,
-      `| Manifests discovered | ${stats.manifests_discovered ?? 0} |`,
-      `| Manifests skipped | ${stats.manifests_skipped ?? 0} |`,
-      `| Orphaned manifests | ${stats.manifests_orphaned ?? 0} |`,
-      `| Action-digest conflicts | ${stats.action_digest_conflicts ?? 0} |`,
-      `| Read-only discarded uploads | ${stats.discarded_uploads ?? 0} |`,
-      `| Backend downloads | ${stats.backend_downloads ?? 0} |`,
-      `| Backend existence checks | ${stats.backend_existence_checks ?? 0} |`,
-      `| Backend load errors | ${stats.backend_load_errors ?? 0} |`,
-      `| Backend save errors | ${stats.backend_save_errors ?? 0} |`,
-      `| Validated action results | ${stats.validated_action_results ?? 0} |`,
-      `| Incomplete action results | ${stats.incomplete_action_results ?? 0} |`,
-      `| Invalid action results | ${stats.invalid_action_results ?? 0} |`,
-      `| Skipped action-result uploads | ${stats.skipped_action_result_uploads ?? 0} |`,
-      `| Bytes served | ${stats.bytes_served ?? 0} |`,
-      `| Bytes received | ${stats.bytes_received ?? 0} |`,
-      "",
-    ].join("\n");
-    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
+    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, buildSummary(stats));
   }
 
   if (logFile && fs.existsSync(logFile)) {
@@ -112,6 +187,10 @@ async function post() {
   }
 }
 
-post().catch((error) => {
-  process.stderr.write(`::warning::cache post-step failed: ${error.message}\n`);
-});
+if (require.main === module) {
+  post().catch((error) => {
+    process.stderr.write(`::warning::cache post-step failed: ${error.message}\n`);
+  });
+}
+
+module.exports = { buildSummary };
