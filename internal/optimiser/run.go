@@ -26,7 +26,20 @@ type RunOptions struct {
 	MaxRecords  int
 	MaxBlobSize int64
 	Timeout     time.Duration
-	Plan        Options
+	// UploadsPerMinute spaces publications, as the cache server does.
+	UploadsPerMinute int
+	// MaxNewBytes stops a pass once it has published this much. A cache near
+	// its quota cannot hold the old and new layouts at once, and stopping early
+	// leaves the remainder for the next pass.
+	MaxNewBytes int64
+	// Reap deletes packs no manifest names at all. Opt-in, because it is the
+	// one thing here that removes data no replacement was published for.
+	Reap bool
+	// ReapOlderThan keeps a pack a running job has published but not yet
+	// committed a manifest for out of reach.
+	ReapOlderThan time.Duration
+	Lister        EntryLister
+	Plan          Options
 	// DryRun plans and reports without publishing or deleting anything.
 	DryRun bool
 	Log    func(string, ...any)
@@ -44,6 +57,15 @@ type Result struct {
 	// Unreadable counts manifests the listing reported but this job could not
 	// restore, so a plan that saw few of them can be recognised as such.
 	Unreadable int
+	// PublishedBytes is what this pass added before freeing anything.
+	PublishedBytes int64
+	// Incomplete marks a pass that stopped at its byte budget with work left.
+	Incomplete bool
+	// Reaped counts packs removed because no manifest named them.
+	Reaped int
+	// Unmanifested counts packs no manifest names, whether or not they were
+	// reaped.
+	Unmanifested int
 	// Skipped explains why a pass did no work. A quiet repository is not a
 	// failure, and a scheduled pass must not go red for having nothing to do.
 	Skipped string
@@ -71,8 +93,9 @@ func Run(ctx context.Context, options RunOptions) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("read the stored layout: %w", err)
 	}
-	options.Log("layout has %d packs, %d live entries, %d orphaned packs, %d orphaned manifests, %d manifests this job cannot restore",
-		len(layout.Packs), len(layout.Entries), layout.OrphanPacks, layout.OrphanManifests, layout.UnreadableManifests)
+	options.Log("layout has %d packs, %d live entries, %d orphaned packs (%d named by no manifest), %d orphaned manifests, %d manifests this job cannot restore",
+		len(layout.Packs), len(layout.Entries), layout.OrphanPacks, len(layout.UnmanifestedPacks),
+		layout.OrphanManifests, layout.UnreadableManifests)
 
 	demand := NewDemand()
 	records, err := options.Records.Collect(ctx, demand, options.MaxRecords, options.Log)
@@ -81,11 +104,22 @@ func Run(ctx context.Context, options RunOptions) (Result, error) {
 	}
 
 	result := Result{
-		Records:    records,
-		Packs:      len(layout.Packs),
-		Entries:    len(layout.Entries),
-		Unreadable: layout.UnreadableManifests,
-		DryRun:     options.DryRun,
+		Records:      records,
+		Packs:        len(layout.Packs),
+		Entries:      len(layout.Entries),
+		Unreadable:   layout.UnreadableManifests,
+		Unmanifested: len(layout.UnmanifestedPacks),
+		DryRun:       options.DryRun,
+	}
+	// Reaping is independent of any repacking plan: an unmanifested pack is
+	// unreachable whether or not the rest of the layout is worth rebuilding.
+	if options.Reap && !options.DryRun {
+		reaped, err := reap(ctx, options, layout)
+		result.Reaped = reaped
+		if err != nil {
+			return result, err
+		}
+		options.Log("reaped %d packs no manifest names", reaped)
 	}
 	plan, err := NewPlan(layout, demand, options.Plan)
 	if errors.Is(err, errTooFewRuns) {
@@ -110,80 +144,135 @@ func Run(ctx context.Context, options RunOptions) (Result, error) {
 	}
 
 	repacker, err := server.NewRepacker(server.RepackOptions{
-		Backend:     options.Backend,
-		CacheDir:    options.CacheDir,
-		KeyPrefix:   options.KeyPrefix,
-		MaxBlobSize: options.MaxBlobSize,
-		Timeout:     options.Timeout,
-		Parents:     layout.Heads,
-		Packs:       layout.Packs,
+		Backend:          options.Backend,
+		CacheDir:         options.CacheDir,
+		KeyPrefix:        options.KeyPrefix,
+		MaxBlobSize:      options.MaxBlobSize,
+		Timeout:          options.Timeout,
+		UploadsPerMinute: options.UploadsPerMinute,
+		Parents:          layout.Heads,
+		Packs:            layout.Packs,
 	})
 	if err != nil {
 		return result, err
 	}
 	defer repacker.Close()
 
-	published := make(map[string]struct{}, len(plan.Groups)*2)
+	remover := newRemover(ctx, options, layout)
+	// Dead packs hold nothing that is served, so removing them before anything
+	// is published frees quota rather than adding to the peak.
+	for _, packID := range plan.Dead {
+		if err := remover.remove(packID); err != nil {
+			return result, err
+		}
+	}
+
+	// A source pack can go as soon as every entry it served has been
+	// republished, which keeps the old and new layouts from both being resident
+	// in full.
+	outstanding := make(map[string]int, len(plan.Rewrite))
+	for _, group := range plan.Groups {
+		for _, entry := range group.Entries {
+			outstanding[entry.Pack]++
+		}
+	}
+
+	var newBytes int64
 	for index, group := range plan.Groups {
+		if options.MaxNewBytes > 0 && newBytes >= options.MaxNewBytes {
+			// Stopping early is safe: the packs still to be rebuilt were never
+			// touched, so they keep serving. The next pass re-plans.
+			options.Log("stopping after %d of %d packs, having published %d bytes this pass",
+				index, len(plan.Groups), newBytes)
+			result.Incomplete = true
+			break
+		}
 		pack, manifestID, err := repacker.Publish(ctx, group.Entries)
 		if err != nil {
 			// Whatever was published already stays: it duplicates entries the
 			// originals still serve, and the originals are still there.
 			return result, fmt.Errorf("publish rebuilt pack %d of %d: %w", index+1, len(plan.Groups), err)
 		}
-		published[pack.Key] = struct{}{}
-		published[server.ManifestKey(options.KeyPrefix, pack.ID, manifestID)] = struct{}{}
+		remover.republished(pack.Key)
+		remover.republished(server.ManifestKey(options.KeyPrefix, pack.ID, manifestID))
+		newBytes += pack.StoredSize
 		result.Rebuilt++
 		options.Log("published pack %s with %d entries under manifest %s", pack.ID, len(group.Entries), manifestID)
-	}
 
-	deleted, err := prune(ctx, options, layout, plan, published)
-	result.Deleted = deleted
-	return result, err
+		for _, entry := range group.Entries {
+			outstanding[entry.Pack]--
+			if outstanding[entry.Pack] > 0 {
+				continue
+			}
+			delete(outstanding, entry.Pack)
+			repacker.Release(entry.Pack)
+			if err := remover.remove(entry.Pack); err != nil {
+				return result, err
+			}
+		}
+	}
+	result.Deleted = remover.deleted
+	result.PublishedBytes = newBytes
+	return result, nil
 }
 
-// prune removes the packs the plan replaced. A pack is only reachable through
-// a manifest that names it, and a manifest whose pack is gone is skipped and
-// left to expire, so the pack is what has to go.
-//
-// Packs are content-addressed, so a group that reproduces an existing pack byte
-// for byte republishes under the key the plan is about to delete. Skipping keys
-// this pass just wrote is what stops that from deleting live data.
-func prune(ctx context.Context, options RunOptions, layout server.Layout, plan Plan, published map[string]struct{}) (int, error) {
-	replaced := make(map[string]struct{}, len(plan.Rewrite)+len(plan.Dead))
-	for _, id := range plan.Rewrite {
-		replaced[id] = struct{}{}
-	}
-	for _, id := range plan.Dead {
-		replaced[id] = struct{}{}
-	}
+// remover deletes a pack and the manifests describing it. A pack is only
+// reachable through a manifest that names it, and a manifest whose pack is gone
+// is skipped and left to expire, so the pack is what has to go.
+type remover struct {
+	ctx       context.Context
+	options   RunOptions
+	packs     map[string]server.LayoutPack
+	manifests map[string][]server.LayoutManifest
+	// Packs are content-addressed, so a group that reproduces an existing pack
+	// byte for byte republishes under the key about to be deleted. Keys written
+	// by this pass are never removed.
+	written map[string]struct{}
+	deleted int
+}
 
-	deleted := 0
+func newRemover(ctx context.Context, options RunOptions, layout server.Layout) *remover {
+	packs := make(map[string]server.LayoutPack, len(layout.Packs))
 	for _, pack := range layout.Packs {
-		if _, drop := replaced[pack.ID]; !drop {
-			continue
+		packs[pack.ID] = pack
+	}
+	manifests := make(map[string][]server.LayoutManifest, len(layout.Manifests))
+	for _, reference := range layout.Manifests {
+		manifests[reference.Pack] = append(manifests[reference.Pack], reference)
+	}
+	return &remover{
+		ctx:       ctx,
+		options:   options,
+		packs:     packs,
+		manifests: manifests,
+		written:   make(map[string]struct{}),
+	}
+}
+
+func (r *remover) republished(key string) { r.written[key] = struct{}{} }
+
+func (r *remover) remove(packID string) error {
+	pack, known := r.packs[packID]
+	if !known {
+		return fmt.Errorf("no descriptor for pack %s", packID)
+	}
+	if _, written := r.written[pack.Key]; written {
+		r.options.Log("keeping pack %s: the rebuild reproduced it exactly", packID)
+	} else {
+		if err := r.options.Pruner.Delete(r.ctx, pack.Key); err != nil {
+			return fmt.Errorf("delete replaced pack %s: %w", packID, err)
 		}
-		if _, republished := published[pack.Key]; republished {
-			options.Log("keeping pack %s: the rebuild reproduced it exactly", pack.ID)
-			continue
-		}
-		if err := options.Pruner.Delete(ctx, pack.Key); err != nil {
-			return deleted, fmt.Errorf("delete replaced pack %s: %w", pack.ID, err)
-		}
-		deleted++
+		r.deleted++
 	}
 	// Tidiness only, and safe in either order: an orphaned manifest is already
 	// skipped by readers.
-	for _, reference := range layout.Manifests {
-		if _, drop := replaced[reference.Pack]; !drop {
+	for _, reference := range r.manifests[packID] {
+		if _, written := r.written[reference.Key]; written {
 			continue
 		}
-		if _, republished := published[reference.Key]; republished {
-			continue
-		}
-		if err := options.Pruner.Delete(ctx, reference.Key); err != nil {
-			options.Log("could not delete superseded manifest %s: %v", reference.ID, err)
+		if err := r.options.Pruner.Delete(r.ctx, reference.Key); err != nil {
+			r.options.Log("could not delete superseded manifest %s: %v", reference.ID, err)
 		}
 	}
-	return deleted, nil
+	return nil
 }

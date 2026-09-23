@@ -1053,7 +1053,9 @@ func openPackWriter(path string, root cid.Cid) (*blockstore.ReadWrite, error) {
 	return blockstore.OpenReadWrite(path, []cid.Cid{root}, blockstore.UseWholeCIDs(true))
 }
 
-func readCARBlock(ctx context.Context, path, contentCID string, maxBlobSize int64) ([]byte, error) {
+// openPackReader opens a pack for reading. Callers that move many blocks hold
+// one open rather than reopening and re-indexing the archive per block.
+func openPackReader(path string, maxBlobSize int64) (*blockstore.ReadOnly, error) {
 	// CAR sections include the block CID as well as the payload. Packs use
 	// CIDv1/raw/SHA-256 CIDs, so a small fixed allowance above the configured
 	// payload limit safely admits every block this cache is allowed to store.
@@ -1065,7 +1067,10 @@ func readCARBlock(ctx context.Context, path, contentCID string, maxBlobSize int6
 	if err != nil {
 		return nil, fmt.Errorf("open CARv2 pack: %w", err)
 	}
-	defer store.Close()
+	return store, nil
+}
+
+func blockFromStore(ctx context.Context, store *blockstore.ReadOnly, contentCID string) ([]byte, error) {
 	content, err := cid.Decode(contentCID)
 	if err != nil {
 		return nil, err
@@ -1080,6 +1085,15 @@ func readCARBlock(ctx context.Context, path, contentCID string, maxBlobSize int6
 		return nil, errors.New("CARv2 block CID integrity check failed")
 	}
 	return data, nil
+}
+
+func readCARBlock(ctx context.Context, path, contentCID string, maxBlobSize int64) ([]byte, error) {
+	store, err := openPackReader(path, maxBlobSize)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	return blockFromStore(ctx, store, contentCID)
 }
 
 func writePrivateTemp(directory, pattern string, data []byte) (string, error) {

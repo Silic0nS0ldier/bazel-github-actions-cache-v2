@@ -38,8 +38,8 @@ func TestTooFewRecordsIsReportedNotFailed(t *testing.T) {
 }
 
 // Packs are content addressed, so a rebuild that reproduces one exactly
-// republishes under the very key the plan is about to delete.
-func TestPruneKeepsAPackTheRebuildReproduced(t *testing.T) {
+// republishes under the very key about to be deleted.
+func TestRemoverKeepsAPackTheRebuildReproduced(t *testing.T) {
 	pruner := &recordingPruner{}
 	layout := layoutWith(
 		[]server.LayoutPack{
@@ -51,16 +51,17 @@ func TestPruneKeepsAPackTheRebuildReproduced(t *testing.T) {
 			{ID: "m2", Key: "prefix-car-manifest-v2-other-m2", Pack: "other"},
 		},
 	)
-	plan := Plan{Rewrite: []string{"same", "other"}}
-	published := map[string]struct{}{"prefix-car-pack-v1-same": {}}
-
 	options := RunOptions{Pruner: pruner, Log: func(string, ...any) {}}
-	deleted, err := prune(context.Background(), options, layout, plan, published)
-	if err != nil {
-		t.Fatal(err)
+	remover := newRemover(context.Background(), options, layout)
+	remover.republished("prefix-car-pack-v1-same")
+
+	for _, packID := range []string{"same", "other"} {
+		if err := remover.remove(packID); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if deleted != 1 {
-		t.Fatalf("deleted %d packs", deleted)
+	if remover.deleted != 1 {
+		t.Fatalf("deleted %d packs", remover.deleted)
 	}
 	for _, key := range pruner.deleted {
 		if key == "prefix-car-pack-v1-same" {
@@ -69,7 +70,7 @@ func TestPruneKeepsAPackTheRebuildReproduced(t *testing.T) {
 	}
 }
 
-func TestPruneLeavesPacksThePlanKept(t *testing.T) {
+func TestRemoverTakesTheManifestsDescribingAPack(t *testing.T) {
 	pruner := &recordingPruner{}
 	layout := layoutWith(
 		[]server.LayoutPack{
@@ -81,15 +82,14 @@ func TestPruneLeavesPacksThePlanKept(t *testing.T) {
 			{ID: "m2", Key: "prefix-car-manifest-v2-dead-m2", Pack: "dead"},
 		},
 	)
-	plan := Plan{Dead: []string{"dead"}, Keep: []string{"kept"}}
-
 	options := RunOptions{Pruner: pruner, Log: func(string, ...any) {}}
-	if _, err := prune(context.Background(), options, layout, plan, nil); err != nil {
+	remover := newRemover(context.Background(), options, layout)
+	if err := remover.remove("dead"); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range pruner.deleted {
 		if key == "prefix-car-pack-v1-kept" || key == "prefix-car-manifest-v2-kept-m1" {
-			t.Fatalf("deleted %s, which the plan kept", key)
+			t.Fatalf("deleted %s, which was not being replaced", key)
 		}
 	}
 	if len(pruner.deleted) != 2 {
@@ -99,16 +99,15 @@ func TestPruneLeavesPacksThePlanKept(t *testing.T) {
 
 // A pack that will not delete must stop the pass rather than leave the rest of
 // the old layout half removed under a silent failure.
-func TestPruneStopsOnAFailedPackDeletion(t *testing.T) {
+func TestRemoverStopsOnAFailedPackDeletion(t *testing.T) {
 	pruner := &recordingPruner{err: errors.New("no permission")}
 	layout := layoutWith(
 		[]server.LayoutPack{{ID: "dead", Key: "prefix-car-pack-v1-dead"}},
 		nil,
 	)
-	plan := Plan{Dead: []string{"dead"}}
-
 	options := RunOptions{Pruner: pruner, Log: func(string, ...any) {}}
-	if _, err := prune(context.Background(), options, layout, plan, nil); err == nil {
+	remover := newRemover(context.Background(), options, layout)
+	if err := remover.remove("dead"); err == nil {
 		t.Fatal("a failed deletion was ignored")
 	}
 }

@@ -33,6 +33,11 @@ func run() error {
 		minWasteFraction = flag.Float64("min-waste-fraction", 0.25, "how much of a pack must be bytes a restore does not want before rebuilding it")
 		minRuns          = flag.Int("min-runs", 3, "refuse to plan from fewer usage records than this")
 		maxBlobSize      = flag.Int64("max-blob-size", 512*1024*1024, "maximum object size in bytes")
+		uploadsPerMinute = flag.Int("uploads-per-minute", 180, "maximum GitHub cache uploads per minute; must be below 200")
+		maxNewBytes      = flag.Int64("max-new-bytes", 2*1024*1024*1024, "stop a pass once it has published this many bytes; zero means no limit")
+		reap             = flag.Bool("reap", false, "delete packs that no manifest names at all")
+		reapOlderThan    = flag.Duration("reap-older-than", 24*time.Hour, "only reap packs older than this")
+		scope            = flag.String("ref", os.Getenv("GITHUB_REF"), "full Git reference whose caches this pass reads and replaces")
 		timeout          = flag.Duration("backend-timeout", 5*time.Minute, "timeout per backend operation")
 		dryRun           = flag.Bool("dry-run", false, "plan and report without publishing or deleting")
 		summaryFile      = flag.String("summary-file", "", "write the result as JSON to this file")
@@ -45,6 +50,9 @@ func run() error {
 	}
 
 	logger := log.New(os.Stderr, "cache-optimiser: ", log.LstdFlags|log.LUTC)
+	if *scope == "" {
+		return fmt.Errorf("--ref is required; it is what keeps this pass inside one cache scope")
+	}
 	dir, err := cacheserver.SafeCacheDir(*cacheDir)
 	if err != nil {
 		return fmt.Errorf("prepare spool directory: %w", err)
@@ -55,7 +63,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	catalog, err := cache.NewActionsCatalog(*timeout, logger)
+	// Scoped to one reference so that everything listed is something this pass
+	// can also restore and replace.
+	catalog, err := cache.NewScopedActionsCatalog(*timeout, logger, *scope)
 	if err != nil {
 		return err
 	}
@@ -64,15 +74,20 @@ func run() error {
 		return err
 	}
 	options := optimiser.RunOptions{
-		Backend:     backend,
-		Catalog:     catalog,
-		Records:     records,
-		CacheDir:    dir,
-		KeyPrefix:   *keyPrefix,
-		MaxRecords:  *maxRecords,
-		MaxBlobSize: *maxBlobSize,
-		Timeout:     *timeout,
-		DryRun:      *dryRun,
+		Backend:          backend,
+		Catalog:          catalog,
+		Records:          records,
+		CacheDir:         dir,
+		KeyPrefix:        *keyPrefix,
+		MaxRecords:       *maxRecords,
+		MaxBlobSize:      *maxBlobSize,
+		UploadsPerMinute: *uploadsPerMinute,
+		MaxNewBytes:      *maxNewBytes,
+		Reap:             *reap,
+		ReapOlderThan:    *reapOlderThan,
+		Lister:           catalog,
+		Timeout:          *timeout,
+		DryRun:           *dryRun,
 		Plan: optimiser.Options{
 			TargetPackSize:   *packSize,
 			MinWasteFraction: *minWasteFraction,
@@ -83,7 +98,7 @@ func run() error {
 	// The pruner is the only thing here that needs actions: write, so a dry run
 	// never even constructs one.
 	if !*dryRun {
-		pruner, err := cache.NewActionsPruner(*timeout)
+		pruner, err := cache.NewActionsPruner(*timeout, *scope)
 		if err != nil {
 			return err
 		}
@@ -105,7 +120,8 @@ func run() error {
 		logger.Printf("read %d usage records; nothing to do: %s", result.Records, result.Skipped)
 		return nil
 	}
-	logger.Printf("read %d usage records; rebuilt %d packs and deleted %d", result.Records, result.Rebuilt, result.Deleted)
+	logger.Printf("read %d usage records; rebuilt %d packs, deleted %d, reaped %d",
+		result.Records, result.Rebuilt, result.Deleted, result.Reaped)
 	return nil
 }
 

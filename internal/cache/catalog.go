@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -29,13 +30,37 @@ type ActionsCatalog struct {
 	baseURL    *url.URL
 	repository string
 	token      string
-	client     *http.Client
-	logger     *log.Logger
+	// ref restricts listings to one Git reference. Empty lists every reference,
+	// which is what a cache server needs: a job restores its own branch's
+	// entries and the default branch's.
+	ref    string
+	client *http.Client
+	logger *log.Logger
+}
+
+// refPattern admits the full references GitHub documents for this parameter.
+var refPattern = regexp.MustCompile(`^refs/[A-Za-z0-9._/-]{1,200}$`)
+
+// validRef applies the parts of git's own refname rules that keep a reference
+// from naming something other than itself.
+func validRef(ref string) bool {
+	return refPattern.MatchString(ref) &&
+		!strings.Contains(ref, "..") &&
+		!strings.Contains(ref, "//") &&
+		!strings.HasSuffix(ref, "/") &&
+		!strings.HasSuffix(ref, ".lock")
 }
 
 // NewActionsCatalog creates a manifest-discovery client from GitHub Actions
 // runner environment variables.
 func NewActionsCatalog(timeout time.Duration, logger *log.Logger) (*ActionsCatalog, error) {
+	return NewScopedActionsCatalog(timeout, logger, "")
+}
+
+// NewScopedActionsCatalog restricts every listing to one Git reference, so that
+// entries another reference owns never appear. A caller that deletes wants this:
+// it can restore exactly what it lists.
+func NewScopedActionsCatalog(timeout time.Duration, logger *log.Logger, ref string) (*ActionsCatalog, error) {
 	repository := os.Getenv("GITHUB_REPOSITORY")
 	if len(strings.Split(repository, "/")) != 2 || strings.HasPrefix(repository, "/") || strings.HasSuffix(repository, "/") {
 		return nil, errors.New("GITHUB_REPOSITORY must be owner/repository for packed-cache manifest discovery")
@@ -52,10 +77,14 @@ func NewActionsCatalog(timeout time.Duration, logger *log.Logger) (*ActionsCatal
 	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" {
 		return nil, fmt.Errorf("invalid GITHUB_API_URL: %w", err)
 	}
+	if ref != "" && !validRef(ref) {
+		return nil, fmt.Errorf("a cache scope must be a full Git reference such as refs/heads/main, got %q", ref)
+	}
 	return &ActionsCatalog{
 		baseURL:    baseURL,
 		repository: repository,
 		token:      token,
+		ref:        ref,
 		client:     &http.Client{Timeout: timeout},
 		logger:     logger,
 	}, nil
@@ -63,15 +92,38 @@ func NewActionsCatalog(timeout time.Duration, logger *log.Logger) (*ActionsCatal
 
 type actionsCacheListResponse struct {
 	ActionsCaches []struct {
-		Key string `json:"key"`
+		Key       string    `json:"key"`
+		CreatedAt time.Time `json:"created_at"`
 	} `json:"actions_caches"`
+}
+
+// CatalogEntry is a listed cache entry with the metadata a deletion decision
+// needs. Age is the only thing distinguishing a pack whose manifest was lost
+// from one a running job has not committed a manifest for yet.
+type CatalogEntry struct {
+	Key       string
+	CreatedAt time.Time
+}
+
+// List returns every cache key whose immutable key starts with keyPrefix,
+// newest first.
+func (c *ActionsCatalog) List(ctx context.Context, keyPrefix string) ([]string, error) {
+	entries, err := c.ListEntries(ctx, keyPrefix)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		keys = append(keys, entry.Key)
+	}
+	return keys, nil
 }
 
 // List returns every cache key whose immutable key starts with keyPrefix,
 // newest first. Pagination follows the Link header rather than page sizes, so
 // a short page cannot end the listing early and silently hide older DAG
 // parents.
-func (c *ActionsCatalog) List(ctx context.Context, keyPrefix string) ([]string, error) {
+func (c *ActionsCatalog) ListEntries(ctx context.Context, keyPrefix string) ([]CatalogEntry, error) {
 	endpoint := *c.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/repos/" + c.repository + "/actions/caches"
 	query := endpoint.Query()
@@ -81,10 +133,13 @@ func (c *ActionsCatalog) List(ctx context.Context, keyPrefix string) ([]string, 
 	query.Set("sort", "created_at")
 	query.Set("direction", "desc")
 	query.Set("per_page", "100")
+	if c.ref != "" {
+		query.Set("ref", c.ref)
+	}
 	endpoint.RawQuery = query.Encode()
 
 	next := endpoint.String()
-	keys := make([]string, 0)
+	keys := make([]CatalogEntry, 0)
 	unexpected := 0
 	for next != "" {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
@@ -119,7 +174,7 @@ func (c *ActionsCatalog) List(ctx context.Context, keyPrefix string) ([]string, 
 				unexpected++
 				continue
 			}
-			keys = append(keys, entry.Key)
+			keys = append(keys, CatalogEntry{Key: entry.Key, CreatedAt: entry.CreatedAt})
 		}
 		if next, err = c.nextPageURL(link); err != nil {
 			return nil, err

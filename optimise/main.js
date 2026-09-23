@@ -58,8 +58,12 @@ function writeJobSummary(result) {
     ["Packs before", result.Packs],
     ["Live entries", result.Entries],
     ["Manifests not restorable here", result.Unreadable],
+    ["Packs no manifest names", result.Unmanifested],
     ["Packs rebuilt", result.Rebuilt],
     ["Packs deleted", result.Deleted],
+    ["Packs reaped", result.Reaped],
+    ["Bytes published", result.PublishedBytes],
+    ["Stopped at the byte budget", result.Incomplete],
     ["Wasted bytes per restore", result.WastedBytes],
     ["Bytes reclaimed", result.ReclaimedBytes],
     ["Dry run", result.DryRun],
@@ -76,10 +80,10 @@ function writeJobSummary(result) {
   fs.appendFileSync(file, table + os.EOL);
 }
 
-// Deleting a cache entry removes every ref's copy of it, but a replacement
-// published from a branch is only visible to that branch. Applying from
-// anywhere else would strip the rest of the repository of entries it can still
-// read, so only the default branch may apply.
+// A pass reads, rebuilds and deletes entirely within the reference it runs on.
+// Running it from a branch would therefore rebuild that branch's own caches,
+// which is almost always a mistake: the entries jobs actually read belong to the
+// default branch.
 function requireDefaultBranch() {
   const defaultBranch = eventPayload().repository?.default_branch;
   const ref = process.env.GITHUB_REF_NAME;
@@ -87,8 +91,8 @@ function requireDefaultBranch() {
     return;
   }
   throw new Error(
-    `refusing to apply from ${ref}: a replacement published here would not be visible to ` +
-      `other branches, while the deletion would affect them; run from ${defaultBranch} or set dry-run`,
+    `refusing to apply from ${ref}: a pass only ever touches its own reference's caches, ` +
+      `so this would rebuild ${ref} rather than what jobs read; run from ${defaultBranch} or set dry-run`,
   );
 }
 
@@ -126,6 +130,13 @@ async function main() {
   const minRuns = positiveInteger("min-runs", 3, 1000);
   const packSizeMB = positiveInteger("pack-size-mb", 8, 32);
   const maxBlobSizeMB = positiveInteger("max-blob-size-mb", 512, 10_240);
+  const uploadsPerMinute = positiveInteger("uploads-per-minute", 180, 199);
+  const maxNewMB = Number.parseInt(input("max-new-mb", "2048"), 10);
+  if (!Number.isSafeInteger(maxNewMB) || maxNewMB < 0) {
+    throw new Error("max-new-mb must be a non-negative integer");
+  }
+  const reap = parseBoolean(input("reap-unmanifested-packs", "false"), "reap-unmanifested-packs");
+  const reapOlderThanHours = positiveInteger("reap-older-than-hours", 24, 8760);
   const backendTimeoutSeconds = positiveInteger("backend-timeout-seconds", 300, 3600);
   const minWasteFraction = fraction("min-waste-fraction", 0.25);
   const dryRun = parseBoolean(input("dry-run", "false"), "dry-run");
@@ -173,6 +184,12 @@ async function main() {
     String(minWasteFraction),
     "--max-blob-size",
     String(maxBlobSizeMB * 1024 * 1024),
+    "--uploads-per-minute",
+    String(uploadsPerMinute),
+    "--max-new-bytes",
+    String(maxNewMB * 1024 * 1024),
+    "--reap-older-than",
+    `${reapOlderThanHours}h`,
     "--backend-timeout",
     `${backendTimeoutSeconds}s`,
     "--summary-file",
@@ -180,6 +197,9 @@ async function main() {
   ];
   if (dryRun) {
     args.push("--dry-run");
+  }
+  if (reap) {
+    args.push("--reap");
   }
 
   try {
@@ -194,6 +214,7 @@ async function main() {
       setOutput("summary", JSON.stringify(result));
       setOutput("rebuilt", String(result.Rebuilt ?? 0));
       setOutput("deleted", String(result.Deleted ?? 0));
+      setOutput("reaped", String(result.Reaped ?? 0));
       if (jobSummary) {
         writeJobSummary(result);
       }

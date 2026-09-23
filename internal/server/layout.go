@@ -55,6 +55,10 @@ type Layout struct {
 	// rather than acted on: a pack a concurrent job has published but not yet
 	// committed a manifest for is indistinguishable from a truly orphaned one.
 	OrphanPacks int
+	// UnmanifestedPacks are the subset of OrphanPacks that no manifest key names
+	// at all. A pack whose manifest merely failed to load is excluded, because
+	// another ref may still be reading it.
+	UnmanifestedPacks []LayoutPack
 	// OrphanManifests are manifests whose pack is gone. They self-expire.
 	OrphanManifests int
 	// UnreadableManifests were listed but could not be restored, because they
@@ -75,6 +79,11 @@ type LayoutOptions struct {
 // ManifestKey names the cache entry a manifest is committed under.
 func ManifestKey(prefix, packID, manifestID string) string {
 	return manifestKeyFor(prefix, packID, manifestID)
+}
+
+// PackKeyPrefix is the key namespace every pack is stored under.
+func PackKeyPrefix(prefix string) string {
+	return packKeyFor(prefix, "")
 }
 
 // ReadLayout discovers and merges the manifest DAG. It publishes nothing, and
@@ -108,11 +117,16 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 	layout := Layout{}
 	decoded := make(map[string]manifest, len(manifestKeys))
 	references := make(map[string]LayoutManifest, len(manifestKeys))
+	// Every pack some manifest key names, whether or not that manifest could be
+	// read. A pack missing from this has no manifest at all, which is a very
+	// different thing from one whose manifest this job cannot restore.
+	manifested := make(map[string]struct{}, len(manifestKeys))
 	for _, key := range manifestKeys {
 		packID, manifestID, ok := parseManifestKey(options.KeyPrefix, key)
 		if !ok {
 			continue
 		}
+		manifested[packID] = struct{}{}
 		if _, listed := listedPacks[packID]; !listed {
 			layout.OrphanManifests++
 			continue
@@ -181,10 +195,20 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 		}
 	}
 	for packID := range listedPacks {
-		if _, declared := packs[packID]; !declared {
-			layout.OrphanPacks++
+		if _, declared := packs[packID]; declared {
+			continue
+		}
+		layout.OrphanPacks++
+		if _, named := manifested[packID]; !named {
+			layout.UnmanifestedPacks = append(layout.UnmanifestedPacks, LayoutPack{
+				ID:  packID,
+				Key: packKeyFor(options.KeyPrefix, packID),
+			})
 		}
 	}
+	sort.Slice(layout.UnmanifestedPacks, func(i, j int) bool {
+		return layout.UnmanifestedPacks[i].ID < layout.UnmanifestedPacks[j].ID
+	})
 
 	for _, id := range ids {
 		layout.Manifests = append(layout.Manifests, references[id])

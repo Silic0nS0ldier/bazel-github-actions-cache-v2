@@ -36,6 +36,22 @@ inputs:
     description: "Maximum object size in MiB"
     required: false
     default: "512"
+  max-new-mb:
+    description: "Stop a pass once it has published this many MiB, so a cache near its quota is not asked to hold the old and new layouts at once; 0 means no limit"
+    required: false
+    default: "2048"
+  uploads-per-minute:
+    description: "Evenly spaced uploads; must be below 200"
+    required: false
+    default: "180"
+  reap-unmanifested-packs:
+    description: "Delete packs that no manifest names at all. These are unreachable, but this is the one thing here that removes data without publishing a replacement"
+    required: false
+    default: "false"
+  reap-older-than-hours:
+    description: "Only reap packs older than this, so a pack a running job has published but not yet committed a manifest for is out of reach"
+    required: false
+    default: "24"
   backend-timeout-seconds:
     description: "Timeout for one GitHub cache operation"
     required: false
@@ -55,6 +71,8 @@ outputs:
     description: "Number of packs rebuilt"
   deleted:
     description: "Number of packs deleted"
+  reaped:
+    description: "Number of unreachable packs reaped"
 runs:
   using: node24
   main: main.js
