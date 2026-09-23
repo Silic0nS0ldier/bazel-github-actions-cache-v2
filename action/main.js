@@ -91,6 +91,8 @@ async function main() {
   if (usageArtifact && !/^[A-Za-z0-9._-]{1,180}$/.test(usageArtifact)) {
     throw new Error("usage-artifact must match [A-Za-z0-9._-]{1,180}");
   }
+  // Validated by the server, which is what decides whether a credential is sent.
+  const assetHeaderRoutes = input("asset-header-routes", "").trim();
 
   const tempDir = safeTemporaryDirectory(
     fs.mkdtempSync(path.join(path.resolve(process.env.RUNNER_TEMP), "bazel-gha-cache-v2-")),
@@ -154,6 +156,8 @@ async function main() {
     statsFile,
     "--usage-artifact",
     usageArtifact,
+    "--asset-header-routes",
+    assetHeaderRoutes,
   ];
   const logDescriptor = fs.openSync(logFile, "a", 0o600);
   const child = spawn(binary, args, {

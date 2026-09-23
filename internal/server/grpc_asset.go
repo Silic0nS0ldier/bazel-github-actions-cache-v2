@@ -25,8 +25,6 @@ import (
 )
 
 // checksumQualifier carries the expected content hash as Subresource Integrity.
-// It is the only qualifier this server acts on: headers are deliberately
-// ignored so that no credential is forwarded to an origin on a caller's behalf.
 const checksumQualifier = "checksum.sri"
 
 const sha256Algorithm = "sha256"
@@ -67,6 +65,7 @@ func defaultAssetClient() *http.Client {
 			if len(via) >= maxAssetRedirects {
 				return errors.New("too many redirects")
 			}
+			stripSensitiveOnRedirect(request, via)
 			return nil
 		},
 	}
@@ -98,6 +97,10 @@ func (a *assetService) FetchBlob(
 	if err != nil {
 		return fetchFailure(uris, err), nil
 	}
+	headers, err := parseAssetHeaders(request.GetQualifiers(), len(uris))
+	if err != nil {
+		return fetchFailure(uris, err), nil
+	}
 	// Bazel sets this to a future timestamp when a repository rule declares no
 	// checksum, precisely to forbid cached content. Nothing here records when an
 	// asset was fetched, so the honest answer is always a miss.
@@ -108,7 +111,7 @@ func (a *assetService) FetchBlob(
 	if reference, found := s.cachedAsset(ctx, checksum); found {
 		return fetchSuccess("", reference), nil
 	}
-	uri, reference, err := s.fetchAsset(ctx, uris, checksum)
+	uri, reference, err := s.fetchAsset(ctx, uris, checksum, headers)
 	if err != nil {
 		return fetchFailure(uris, err), nil
 	}
@@ -210,13 +213,14 @@ func (s *Server) fetchAsset(
 	ctx context.Context,
 	uris []string,
 	checksum assetChecksum,
+	headers assetHeaders,
 ) (string, digestReference, error) {
 	if len(uris) == 0 {
 		return "", digestReference{}, errors.New("no uris were supplied")
 	}
 	var last error
-	for _, uri := range uris {
-		reference, err := s.fetchAssetFrom(ctx, uri, checksum)
+	for index, uri := range uris {
+		reference, err := s.fetchAssetFrom(ctx, uri, checksum, headers.forURI(index))
 		if err == nil {
 			return uri, reference, nil
 		}
@@ -234,6 +238,7 @@ func (s *Server) fetchAssetFrom(
 	ctx context.Context,
 	uri string,
 	checksum assetChecksum,
+	headers http.Header,
 ) (digestReference, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
@@ -242,8 +247,12 @@ func (s *Server) fetchAssetFrom(
 	if parsed.Scheme != "https" {
 		return digestReference{}, fmt.Errorf("refusing to fetch over %q", parsed.Scheme)
 	}
+	headers, err = permittedHeaders(headers, parsed, s.assetRoutes)
+	if err != nil {
+		return digestReference{}, err
+	}
 
-	path, reference, err := s.downloadAsset(ctx, uri, checksum)
+	path, reference, err := s.downloadAsset(ctx, uri, checksum, headers)
 	if err != nil {
 		return digestReference{}, err
 	}
@@ -274,6 +283,7 @@ func (s *Server) downloadAsset(
 	ctx context.Context,
 	uri string,
 	checksum assetChecksum,
+	headers http.Header,
 ) (string, digestReference, error) {
 	if err := s.acquire(ctx); err != nil {
 		return "", digestReference{}, err
@@ -285,6 +295,11 @@ func (s *Server) downloadAsset(
 	request, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, uri, nil)
 	if err != nil {
 		return "", digestReference{}, errors.New("uri cannot be requested")
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			request.Header.Add(name, value)
+		}
 	}
 	response, err := s.cfg.AssetClient.Do(request)
 	if err != nil {

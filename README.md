@@ -218,6 +218,7 @@ Do not enable Bazel remote-cache compression with this release.
 | `backend-timeout-seconds` | `300` | Timeout for one GitHub cache operation and initial packed-manifest discovery |
 | `port` | `0` | Loopback port; zero chooses a free dynamic port |
 | `grpc-port` | `0` | Loopback port for the gRPC API; zero chooses a free dynamic port |
+| `asset-header-routes` | `` | URI patterns, one per line, whose credentials the downloader may forward |
 | `usage-artifact` | `bazel-cache-usage` | Job artifact to publish the usage record to; empty disables it |
 
 The main step outputs `url`, `grpc-url`, `stats-url`, `writable`,
@@ -463,9 +464,51 @@ Actions-cache creation each.
 Bazel's downloader never pushes a fetched archive back, so a cache-only
 implementation could never be populated. On a miss this server fetches the asset
 itself, over `https` only, verifies it against the declared checksum before
-storing anything, and publishes it so that later jobs get a hit. Credentials are
-never forwarded: `http_header` qualifiers are ignored, so private origins are not
-supported. `asset_downloads` and `asset_fetch_errors` report that activity.
+storing anything, and publishes it so that later jobs get a hit.
+`asset_downloads` and `asset_fetch_errors` report that activity.
+
+Private origins are supported through the `http_header` and `http_header_url`
+qualifiers, so registries such as `ghcr.io` can be fetched through the cache.
+It takes two opt-ins, because each side defaults to refusing.
+
+Bazel only sends credentials when you ask it to:
+
+```
+common --remote_downloader_propagate_credentials
+```
+
+Without that flag Bazel strips `Authorization`, `Proxy-Authorization` and
+`Cookie` before the request leaves it, and an authenticated origin answers with
+`401`.
+
+This server only forwards them to routes you name, one per line:
+
+```yaml
+- uses: cre4ture/bazel-github-actions-cache-v2@<FULL_COMMIT_SHA>
+  with:
+    asset-header-routes: |
+      https://ghcr.io/v2/acme/*
+      https://*.jfrog.example/artifactory/
+```
+
+A trailing `*` makes the path a prefix; without one the match still falls on a
+segment boundary, so `https://ghcr.io/v2/acme` does not admit `/v2/acme-private`.
+`*.example.com` covers subdomains but not the apex, and a different port is a
+different origin. A request carrying a credential for any route you have not
+named is refused outright rather than retried without it, so the asset is left
+to Bazel's own downloader and never reaches the cache. Headers that carry no
+credential need no route.
+
+That refusal is the mechanism for keeping a private asset out of a shared cache,
+and it is worth understanding why you might want it: a fetched asset is stored
+under its checksum in the same cache every job in the repository reads, so
+content pulled with your credentials becomes readable by any job in that
+repository. Name a route only when that is acceptable for the content behind it.
+
+Headers that decide routing or framing, such as `Host` and `Content-Length`, are
+refused outright, as is any value containing a control character. Credentials do
+not survive a redirect that leaves the origin they were issued for, matching what
+browsers and `curl` do. Header values are never logged.
 
 Every failure names the resource it refers to, because Bazel reports the message
 on its own:
