@@ -308,7 +308,7 @@ jobs:
 
 `key-prefix` must match the one the cache action uses, and `usage-artifact` must
 match where it publishes its records. The action writes a job summary and sets
-`summary`, `rebuilt` and `deleted` outputs.
+`summary`, `rebuilt`, `deleted` and `reaped` outputs.
 
 Start with `dry-run: true`. It reports the same numbers without publishing or
 deleting anything, and never even constructs a client that can delete:
@@ -334,7 +334,18 @@ restore pays for and does not want.
 | `min-runs` | `3` | Refuses to plan from a smaller window |
 | `pack-size-mb` | `8` | Target size of a rebuilt pack |
 | `min-waste-fraction` | `0.25` | How wasteful a pack must be to be rebuilt |
+| `max-new-mb` | `2048` | Stop once this much has been published |
+| `uploads-per-minute` | `180` | Evenly spaced uploads; must be below 200 |
+| `reap-unmanifested-packs` | `false` | Delete packs no manifest names |
+| `reap-older-than-hours` | `24` | Age below which a pack is never reaped |
 | `dry-run` | `false` | Plan and report only |
+
+A rebuilt pack is published before the one it replaces is deleted, so a cache
+near its quota would briefly have to hold both layouts. `max-new-mb` bounds
+that: a pass stops once it has published that much, and each source pack is
+deleted as soon as every entry it served has been republished. Stopping early is
+safe, because the packs not yet rebuilt were never touched. The next pass
+re-plans from where this one left off.
 
 Three properties are worth knowing before enabling it:
 
@@ -347,16 +358,37 @@ Three properties are worth knowing before enabling it:
   layout and will find packs gone. Scheduling the pass when the repository is
   quiet narrows that window; nothing can close it.
 
-It only applies from the default branch. Deleting a cache entry removes every
-ref's copy of it, while a replacement published from a branch is visible only to
-that branch, so applying from anywhere else would strip the rest of the
-repository of entries it can still read. `dry-run` works from any ref.
+It only applies from the default branch. A pass reads, rebuilds and deletes
+entirely within the Git reference it runs on, so running it from a branch would
+rebuild that branch's own caches rather than the ones jobs read. `dry-run` works
+from any ref.
 
-A pass plans from the entries its own cache scope can restore. The REST listing
-also reports entries belonging to other refs, and entries evicted since it was
-taken; those are counted as "not restorable here" in the job summary and left
-alone. A pack is never a deletion candidate unless the manifest describing it
-was read successfully.
+Everything a pass touches belongs to one reference. The listing is narrowed to
+it, so entries another branch owns never appear, and deletion names the same
+reference, so a copy this pass never listed is never removed. That also means
+the "not restorable here" count reflects genuine eviction rather than entries
+that were only ever visible to another branch.
+
+A pack is never a deletion candidate unless the manifest describing it was read
+successfully.
+
+### Reaping unreachable packs
+
+A reader only ever finds a pack through a manifest naming it, so a pack no
+manifest names is unreachable and is pure storage cost. `reap-unmanifested-packs`
+deletes those. It is off by default and is the one thing here that removes data
+without publishing a replacement.
+
+Two things keep it from taking anything live. A pack whose manifest exists but
+this job could not read is *not* unmanifested and is never a candidate, because
+another ref may still be reading it. And `reap-older-than-hours` keeps a pack a
+running job has published but not yet committed a manifest for out of reach: the
+two are indistinguishable except by age. A pack whose creation time the listing
+does not report is left alone.
+
+This is worth enabling when the job summary shows a large "packs no manifest
+names" count, which usually means manifests were evicted while their packs
+survived.
 
 `min-runs` refuses to plan from too small a window, since a handful of records
 describes those particular jobs rather than the repository. A pass with too few

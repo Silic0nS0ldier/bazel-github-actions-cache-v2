@@ -92,6 +92,52 @@ test("a pass that applies does not ask for a dry run", (t) => {
   assert.ok(!args.includes("--dry-run"));
 });
 
+// Reaping removes data without publishing a replacement, so it has to stay off
+// unless it is asked for.
+test("reaping is off unless it is asked for", (t) => {
+  const off = runWrapper(t, { "INPUT_DRY-RUN": "true" });
+  if (!off) return;
+  assert.equal(off.result.status, 0, off.result.stdout + off.result.stderr);
+  assert.ok(!JSON.parse(fs.readFileSync(off.argsFile, "utf8")).includes("--reap"));
+});
+
+test("reaping passes its age threshold through", (t) => {
+  const run = runWrapper(t, {
+    "INPUT_DRY-RUN": "true",
+    "INPUT_REAP-UNMANIFESTED-PACKS": "true",
+    "INPUT_REAP-OLDER-THAN-HOURS": "48",
+  });
+  if (!run) return;
+
+  assert.equal(run.result.status, 0, run.result.stdout + run.result.stderr);
+  const args = JSON.parse(fs.readFileSync(run.argsFile, "utf8"));
+  assert.ok(args.includes("--reap"));
+  assert.equal(args[args.indexOf("--reap-older-than") + 1], "48h");
+});
+
+test("the publish budget and upload rate reach the binary", (t) => {
+  const run = runWrapper(t, {
+    "INPUT_DRY-RUN": "true",
+    "INPUT_MAX-NEW-MB": "512",
+    "INPUT_UPLOADS-PER-MINUTE": "120",
+  });
+  if (!run) return;
+
+  assert.equal(run.result.status, 0, run.result.stdout + run.result.stderr);
+  const args = JSON.parse(fs.readFileSync(run.argsFile, "utf8"));
+  const valueOf = (flag) => args[args.indexOf(flag) + 1];
+  assert.equal(valueOf("--max-new-bytes"), String(512 * 1024 * 1024));
+  assert.equal(valueOf("--uploads-per-minute"), "120");
+});
+
+test("an upload rate at or above GitHub's limit is refused", (t) => {
+  const run = runWrapper(t, { "INPUT_UPLOADS-PER-MINUTE": "200" });
+  if (!run) return;
+
+  assert.equal(run.result.status, 1);
+  assert.match(run.result.stdout, /uploads-per-minute must be an integer between 1 and 199/);
+});
+
 test("the result reaches the job summary and the step outputs", (t) => {
   const run = runWrapper(t, { "INPUT_DRY-RUN": "true" });
   if (!run) return;

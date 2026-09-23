@@ -18,10 +18,14 @@ type ActionsPruner struct {
 	baseURL    *url.URL
 	repository string
 	token      string
+	ref        string
 	client     *http.Client
 }
 
-func NewActionsPruner(timeout time.Duration) (*ActionsPruner, error) {
+// NewActionsPruner deletes only within one Git reference. Without a ref the API
+// removes every reference's copy of a key, which would take entries this caller
+// never listed and cannot replace.
+func NewActionsPruner(timeout time.Duration, ref string) (*ActionsPruner, error) {
 	repository := os.Getenv("GITHUB_REPOSITORY")
 	if len(strings.Split(repository, "/")) != 2 || strings.HasPrefix(repository, "/") || strings.HasSuffix(repository, "/") {
 		return nil, errors.New("GITHUB_REPOSITORY must be owner/repository")
@@ -38,10 +42,14 @@ func NewActionsPruner(timeout time.Duration) (*ActionsPruner, error) {
 	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" {
 		return nil, fmt.Errorf("invalid GITHUB_API_URL: %w", err)
 	}
+	if ref == "" || !validRef(ref) {
+		return nil, fmt.Errorf("deleting needs a full Git reference such as refs/heads/main, got %q", ref)
+	}
 	return &ActionsPruner{
 		baseURL:    baseURL,
 		repository: repository,
 		token:      token,
+		ref:        ref,
 		client:     &http.Client{Timeout: timeout},
 	}, nil
 }
@@ -54,10 +62,11 @@ func (p *ActionsPruner) Delete(ctx context.Context, key string) error {
 	}
 	endpoint := *p.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/repos/" + p.repository + "/actions/caches"
-	// The API treats key as an exact match here, and a missing ref means all
-	// refs, which is what an immutable content-addressed key needs.
+	// Both are exact matches. Without the ref the API would delete every
+	// reference's copy of this key.
 	query := url.Values{}
 	query.Set("key", key)
+	query.Set("ref", p.ref)
 	endpoint.RawQuery = query.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
