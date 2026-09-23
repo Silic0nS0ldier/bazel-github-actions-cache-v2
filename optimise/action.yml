@@ -1,0 +1,60 @@
+name: Optimise Bazel cache layout
+description: Regroup CARv2 packs around how recent jobs actually read them, and delete what it replaces
+author: cre4ture
+branding:
+  icon: package
+  color: green
+inputs:
+  github-token:
+    description: "Token with actions: write; required to delete the cache entries this pass replaces"
+    required: true
+  key-prefix:
+    description: "Immutable GitHub cache-key namespace to optimise; must match the cache action's key-prefix"
+    required: false
+    default: bazel-http-v1
+  usage-artifact:
+    description: "Job artifact the cache action publishes its usage records to"
+    required: false
+    default: bazel-cache-usage
+  max-records:
+    description: "How many recent runs to plan from"
+    required: false
+    default: "25"
+  min-runs:
+    description: "Refuse to plan from fewer usage records than this; too small a window describes particular jobs rather than the repository"
+    required: false
+    default: "3"
+  pack-size-mb:
+    description: "Target size of a rebuilt pack in MiB (1-32)"
+    required: false
+    default: "8"
+  min-waste-fraction:
+    description: "How much of a pack must be bytes an average restore pays for and does not want before rebuilding it (0-1)"
+    required: false
+    default: "0.25"
+  max-blob-size-mb:
+    description: "Maximum object size in MiB"
+    required: false
+    default: "512"
+  backend-timeout-seconds:
+    description: "Timeout for one GitHub cache operation"
+    required: false
+    default: "300"
+  dry-run:
+    description: "Plan and report without publishing or deleting anything"
+    required: false
+    default: "false"
+  job-summary:
+    description: "Write the result to the job summary"
+    required: false
+    default: "true"
+outputs:
+  summary:
+    description: "JSON result of the pass"
+  rebuilt:
+    description: "Number of packs rebuilt"
+  deleted:
+    description: "Number of packs deleted"
+runs:
+  using: node24
+  main: main.js

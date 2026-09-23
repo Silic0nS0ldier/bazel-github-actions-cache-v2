@@ -18,6 +18,11 @@ permissions:
   contents: read
   actions: read
 
+# Shared with the optimiser smoke test, which rewrites the same key prefix.
+concurrency:
+  group: bazel-smoke-cache
+  cancel-in-progress: false
+
 jobs:
   smoke:
     runs-on: ubuntu-24.04

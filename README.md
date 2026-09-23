@@ -265,6 +265,93 @@ to opt out, or to a distinct name per instance if one job runs this action more
 than once, since artifact names must be unique within a job. A failed upload
 warns and never fails the job.
 
+### Rebuilding the layout around how it is read
+
+Packs group whatever a job happened to produce together. Over time that stops
+matching how they are read, and restoring one pack to get one blob pays for the
+rest. A second action regroups pack contents around the usage records and
+deletes what it replaces.
+
+It only applies to `storage-mode: packs`. Run it on a schedule, in its own
+workflow:
+
+```yaml
+name: Optimise Bazel cache
+
+on:
+  schedule:
+    - cron: "17 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A second pass would plan against a view the first is already changing.
+concurrency:
+  group: optimise-bazel-cache
+  cancel-in-progress: false
+
+jobs:
+  optimise:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Deleting the cache entries this pass replaces is the only thing that
+      # needs write.
+      actions: write
+    steps:
+      - uses: cre4ture/bazel-github-actions-cache-v2/optimise@<FULL_COMMIT_SHA>
+        with:
+          github-token: ${{ github.token }}
+          key-prefix: bazel-http-v1
+```
+
+`key-prefix` must match the one the cache action uses, and `usage-artifact` must
+match where it publishes its records. The action writes a job summary and sets
+`summary`, `rebuilt` and `deleted` outputs.
+
+Start with `dry-run: true`. It reports the same numbers without publishing or
+deleting anything, and never even constructs a client that can delete:
+
+```yaml
+      - uses: cre4ture/bazel-github-actions-cache-v2/optimise@<FULL_COMMIT_SHA>
+        with:
+          github-token: ${{ github.token }}
+          dry-run: true
+```
+
+Entries are grouped by the set of runs that downloaded them, so entries wanted
+by the same jobs share a pack and entries nothing downloads are moved out of the
+way. A pack is only rebuilt when `min-waste-fraction` of it is bytes an average
+restore pays for and does not want.
+
+| Input | Default | Purpose |
+| --- | --- | --- |
+| `github-token` | required | Needs `actions: write` |
+| `key-prefix` | `bazel-http-v1` | Must match the cache action |
+| `usage-artifact` | `bazel-cache-usage` | Must match the cache action |
+| `max-records` | `25` | How many recent runs to plan from |
+| `min-runs` | `3` | Refuses to plan from a smaller window |
+| `pack-size-mb` | `8` | Target size of a rebuilt pack |
+| `min-waste-fraction` | `0.25` | How wasteful a pack must be to be rebuilt |
+| `dry-run` | `false` | Plan and report only |
+
+Three properties are worth knowing before enabling it:
+
+- **Nothing is deleted until its replacement is published.** An interrupted pass
+  leaves duplicated storage, never a hole.
+- **No CAS entry is ever dropped.** A manifest records an action's closure as
+  pack IDs rather than digests, so the optimiser cannot prove a blob is
+  unreferenced. It reclaims only packs whose every copy already lost the merge.
+- **A job running during the pass may lose hits, not data.** It resolved the old
+  layout and will find packs gone. Scheduling the pass when the repository is
+  quiet narrows that window; nothing can close it.
+
+`min-runs` refuses to plan from too small a window, since a handful of records
+describes those particular jobs rather than the repository. A pass with too few
+records, or with nothing worth rebuilding, reports that in the job summary and
+succeeds; a quiet week does not turn a scheduled workflow red.
+
 ## Protocol support
 
 The adapter serves two endpoints from one process against one cache: HTTP on
@@ -466,10 +553,10 @@ build ID, with VCS stamping disabled, for deterministic Linux amd64/arm64
 output. CI builds them twice and requires both builds to produce identical
 checksums.
 
-`dist/` is not tracked in Git, and neither is any other build output. The action
-resolves its server binary in two steps:
+`dist/` is not tracked in Git, and neither is any other build output. Both
+actions resolve their binary in two steps:
 
-1. If `dist/cache-server-linux-<arch>` exists in the checkout, it is used
+1. If `dist/<program>-linux-<arch>` exists in the checkout, it is used
    directly. This is how local development, CI, and the smoke workflow exercise
    the code under review rather than a published artifact.
 2. Otherwise the binary is downloaded from the release the action itself was

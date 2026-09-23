@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 
-const ASSET_PREFIX = "cache-server-linux-";
+const PROGRAMS = new Set(["cache-server", "cache-optimiser"]);
 const USER_AGENT = "bazel-github-actions-cache-v2";
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const VERIFY_TIMEOUT_MS = 60_000;
@@ -13,8 +13,13 @@ const REPOSITORY_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 const TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 
-function assetName(architecture) {
-  return `${ASSET_PREFIX}${architecture}`;
+// Only names this action publishes are accepted, so a caller cannot steer the
+// download or the install path towards something else.
+function assetName(program, architecture) {
+  if (!PROGRAMS.has(program)) {
+    throw new Error(`unknown program ${program}`);
+  }
+  return `${program}-linux-${architecture}`;
 }
 
 function releaseAssetUrl(repository, version, asset) {
@@ -126,10 +131,11 @@ function install(source, destination) {
   return destination;
 }
 
-// resolveServerBinary returns a cache-server binary for this runner. A locally
-// built dist/ always wins so that CI and the smoke workflow exercise the code
-// under review rather than a published artifact.
-async function resolveServerBinary({
+// resolveBinary returns one of this action's binaries for this runner. A
+// locally built dist/ always wins so that CI and the smoke workflow exercise
+// the code under review rather than a published artifact.
+async function resolveBinary({
+  program,
   actionRoot,
   architecture,
   installPath,
@@ -139,7 +145,7 @@ async function resolveServerBinary({
   toolCacheRoot,
   log,
 }) {
-  const asset = assetName(architecture);
+  const asset = assetName(program, architecture);
   const localBinary = path.join(actionRoot, "dist", asset);
   if (fs.existsSync(localBinary)) {
     log(`using locally built dist/${asset}`);
@@ -154,7 +160,7 @@ async function resolveServerBinary({
   }
 
   const version = await releaseVersion({ repository, ref, token });
-  const cached = path.join(toolCacheRoot, "bazel-gha-cache-server", version, architecture, asset);
+  const cached = path.join(toolCacheRoot, `bazel-gha-${program}`, version, architecture, asset);
   if (fs.existsSync(cached)) {
     log(`using cached ${asset} from ${version}`);
     return install(cached, installPath);
@@ -182,5 +188,5 @@ module.exports = {
   download,
   releaseAssetUrl,
   releaseVersion,
-  resolveServerBinary,
+  resolveBinary,
 };

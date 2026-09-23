@@ -16,7 +16,7 @@ const {
   saveState,
   setOutput,
 } = require("./lib");
-const { resolveServerBinary } = require("./release");
+const { resolveBinary } = require("./release");
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -102,7 +102,8 @@ async function main() {
   const shutdownToken = crypto.randomBytes(32).toString("hex");
   mask(shutdownToken);
 
-  const binary = await resolveServerBinary({
+  const binary = await resolveBinary({
+    program: "cache-server",
     actionRoot: path.resolve(__dirname, ".."),
     architecture,
     // Installing under a fixed name keeps every part of the spawned path a

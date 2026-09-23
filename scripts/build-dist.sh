@@ -11,13 +11,17 @@ fi
 
 version=${VERSION:-dev}
 ldflags="-s -w -buildid= -X main.version=$version"
-for architecture in amd64 arm64; do
-  output="$project_dir/dist/cache-server-linux-$architecture"
-  CGO_ENABLED=0 GOOS=linux GOARCH="$architecture" \
-    go build -buildvcs=false -trimpath -ldflags "$ldflags" -o "$output" ./cmd/cache-server
-  chmod 0755 "$output"
+for program in cache-server cache-optimiser; do
+  for architecture in amd64 arm64; do
+    output="$project_dir/dist/$program-linux-$architecture"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$architecture" \
+      go build -buildvcs=false -trimpath -ldflags "$ldflags" -o "$output" "./cmd/$program"
+    chmod 0755 "$output"
+  done
 done
 (
   cd "$project_dir/dist"
-  sha256sum cache-server-linux-* > SHA256SUMS
+  # Sorted by byte value so the checksum file is reproducible whatever the
+  # builder's locale.
+  LC_ALL=C sha256sum cache-optimiser-linux-* cache-server-linux-* > SHA256SUMS
 )

@@ -12,7 +12,7 @@ const {
   download,
   releaseAssetUrl,
   releaseVersion,
-  resolveServerBinary,
+  resolveBinary,
 } = require("./release");
 
 const REPOSITORY = "cre4ture/bazel-github-actions-cache-v2";
@@ -26,7 +26,8 @@ function workspace(t) {
 }
 
 function resolve(overrides) {
-  return resolveServerBinary({
+  return resolveBinary({
+    program: "cache-server",
     architecture: "amd64",
     repository: REPOSITORY,
     ref: "v1.2.3",
@@ -56,9 +57,52 @@ async function localServer(t, handler) {
 
 test("release assets are addressed by tag, not by latest", () => {
   assert.strictEqual(
-    releaseAssetUrl(REPOSITORY, "v1.2.3", assetName("arm64")),
+    releaseAssetUrl(REPOSITORY, "v1.2.3", assetName("cache-server", "arm64")),
     "https://github.com/cre4ture/bazel-github-actions-cache-v2/releases/download/v1.2.3/cache-server-linux-arm64",
   );
+  assert.strictEqual(
+    releaseAssetUrl(REPOSITORY, "v1.2.3", assetName("cache-optimiser", "amd64")),
+    "https://github.com/cre4ture/bazel-github-actions-cache-v2/releases/download/v1.2.3/cache-optimiser-linux-amd64",
+  );
+});
+
+// The program name reaches a download URL and an install path, so only names
+// this action actually publishes may be used.
+test("an unknown program name is rejected", () => {
+  for (const program of ["", "sh", "../cache-server", undefined]) {
+    assert.throws(() => assetName(program, "amd64"), /unknown program/);
+  }
+});
+
+// Both binaries are cached under the same root, so sharing a directory would
+// let one be served in place of the other.
+test("each program has its own tool-cache directory", async (t) => {
+  const root = workspace(t);
+  const toolCacheRoot = path.join(root, "tools");
+  const optimiser = path.join(
+    toolCacheRoot,
+    "bazel-gha-cache-optimiser",
+    "v1.2.3",
+    "amd64",
+    assetName("cache-optimiser", "amd64"),
+  );
+  fs.mkdirSync(path.dirname(optimiser), { recursive: true });
+  fs.writeFileSync(optimiser, "cached optimiser");
+
+  const installPath = path.join(root, "installed");
+  const resolved = await resolveBinary({
+    program: "cache-optimiser",
+    actionRoot: path.join(root, "checkout"),
+    architecture: "amd64",
+    installPath,
+    repository: REPOSITORY,
+    ref: "v1.2.3",
+    token: "",
+    toolCacheRoot,
+    log: () => {},
+  });
+  assert.strictEqual(resolved, installPath);
+  assert.strictEqual(fs.readFileSync(installPath, "utf8"), "cached optimiser");
 });
 
 test("a tag ref names its own release", async () => {
@@ -113,7 +157,7 @@ test("a ref that names no release at all is rejected", async () => {
 test("a locally built binary is preferred over any published release", async (t) => {
   const root = workspace(t);
   const actionRoot = path.join(root, "checkout");
-  const local = path.join(actionRoot, "dist", assetName("amd64"));
+  const local = path.join(actionRoot, "dist", assetName("cache-server", "amd64"));
   fs.mkdirSync(path.dirname(local), { recursive: true });
   fs.writeFileSync(local, "locally built");
 
@@ -144,7 +188,7 @@ test("an already verified binary is installed at the fixed path that gets execut
     "bazel-gha-cache-server",
     version,
     "amd64",
-    assetName("amd64"),
+    assetName("cache-server", "amd64"),
   );
   fs.mkdirSync(path.dirname(cached), { recursive: true });
   fs.writeFileSync(cached, "previously verified");
@@ -169,7 +213,7 @@ test("a download that lands on plain HTTP is refused before the body is read", a
   });
 
   await assert.rejects(
-    download(`http://${address}/${assetName("amd64")}`),
+    download(`http://${address}/${assetName("cache-server", "amd64")}`),
     /refusing to download/,
   );
   assert.ok(served, "the endpoint should have been reached and then rejected");
