@@ -34,6 +34,8 @@ type packStore struct {
 	renewInterval time.Duration
 	maxManifests  int
 
+	// flushMu serialises flushes, so p.mu need not be held across uploads.
+	flushMu         sync.Mutex
 	mu              sync.Mutex
 	packs           map[string]packDescriptor
 	declaredBytes   map[string]int64
@@ -559,28 +561,41 @@ func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor)
 }
 
 func (p *packStore) flush(ctx context.Context, all bool) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
 	for {
-		flushed, err := p.flushOneLocked(ctx)
+		flushed, err := p.flushOne(ctx)
 		if err != nil || !flushed || !all {
 			return err
 		}
 	}
 }
 
-func (p *packStore) flushOneLocked(ctx context.Context) (bool, error) {
+// flushOne holds p.mu only between backend calls. Holding it across an upload
+// stalls every read, and deadlocks with a pack download that holds a backend
+// slot while it waits for p.mu.
+func (p *packStore) flushOne(ctx context.Context) (bool, error) {
+	p.mu.Lock()
 	casDigests := p.selectCASLocked()
 	selectedCAS := make(map[string]struct{}, len(casDigests))
 	for _, digest := range casDigests {
 		selectedCAS[digest] = struct{}{}
 	}
 	actionDigests := p.selectActionsLocked(selectedCAS)
+	casValues := make([]object, len(casDigests))
+	for i, digest := range casDigests {
+		casValues[i] = p.pendingCAS[digest]
+	}
+	actionValues := make([]pendingAction, len(actionDigests))
+	for i, digest := range actionDigests {
+		actionValues[i] = p.pendingActions[digest]
+	}
+	p.mu.Unlock()
 	if len(casDigests) == 0 && len(actionDigests) == 0 {
 		return false, nil
 	}
 
-	packPath, entries, packSize, packID, err := p.buildPackLocked(ctx, casDigests, actionDigests)
+	packPath, entries, packSize, packID, err := p.buildPack(ctx, casDigests, casValues, actionDigests, actionValues)
 	if err != nil {
 		return false, err
 	}
@@ -589,9 +604,11 @@ func (p *packStore) flushOneLocked(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("publish CARv2 pack: %w", err)
 	}
 	p.server.stats.packUploads.Add(1)
-	p.listedPacks[pack.ID] = struct{}{}
 
+	p.mu.Lock()
+	p.listedPacks[pack.ID] = struct{}{}
 	manifestValue := p.manifestForPackLocked(pack, entries, selectedCAS)
+	p.mu.Unlock()
 	manifestData, manifestID, err := encodeManifest(manifestValue)
 	if err != nil {
 		return false, err
@@ -604,8 +621,10 @@ func (p *packStore) flushOneLocked(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("publish manifest commit point: %w", err)
 	}
 	p.server.stats.manifestUploads.Add(1)
+	p.mu.Lock()
 	p.applyManifestLocked(manifestID, manifestValue)
 	p.removePendingLocked(casDigests, actionDigests)
+	p.mu.Unlock()
 	return true, nil
 }
 
@@ -630,15 +649,21 @@ func (p *packStore) encodeBlock(data []byte, contentCID cid.Cid) ([]byte, string
 	return stored, encoding, blockCID, nil
 }
 
-func (p *packStore) buildPackLocked(ctx context.Context, casDigests, actionDigests []string) (string, packedEntries, int64, string, error) {
+func (p *packStore) buildPack(
+	ctx context.Context,
+	casDigests []string,
+	casValues []object,
+	actionDigests []string,
+	actionValues []pendingAction,
+) (string, packedEntries, int64, string, error) {
 	type blockEntry struct {
 		cid  cid.Cid
 		data []byte
 	}
 	blocksToWrite := make([]blockEntry, 0, len(casDigests)+len(actionDigests))
 	entries := packedEntries{}
-	for _, digest := range casDigests {
-		value := p.pendingCAS[digest]
+	for i, digest := range casDigests {
+		value := casValues[i]
 		data, err := os.ReadFile(value.path)
 		if err != nil {
 			return "", packedEntries{}, 0, "", err
@@ -660,8 +685,8 @@ func (p *packStore) buildPackLocked(ctx context.Context, casDigests, actionDiges
 			Size:     value.size,
 		})
 	}
-	for _, digest := range actionDigests {
-		value := p.pendingActions[digest]
+	for i, digest := range actionDigests {
+		value := actionValues[i]
 		data, err := os.ReadFile(value.object.path)
 		if err != nil {
 			return "", packedEntries{}, 0, "", err
