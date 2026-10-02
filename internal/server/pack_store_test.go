@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strconv"
 	"strings"
@@ -530,6 +531,54 @@ func TestPackedStoreServesOneOfConflictingActionResults(t *testing.T) {
 	if !inLayout {
 		t.Fatal("the layout does not resolve the action to the served result")
 	}
+}
+
+func TestPackedStoreServesReadsWhileAFlushIsUploading(t *testing.T) {
+	memory := newMemoryBackend()
+	seed := testPackedServer(t, memory)
+	restored := []byte("restored while uploading")
+	if response := putCacheObject(seed, "/cas/"+digest(restored), restored); response.Code != http.StatusNoContent {
+		t.Fatalf("CAS PUT = %d", response.Code)
+	}
+	closePackedServer(t, seed)
+
+	backend := &blockingSaveBackend{
+		memoryBackend: memory,
+		started:       make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	server := testServer(t, backend, func(cfg *Config) {
+		cfg.StorageMode = "packs"
+		cfg.Catalog = memoryCatalog{backend: memory}
+		cfg.PackSize = 1024
+		cfg.PackFlushInterval = time.Hour
+		cfg.MaxManifests = 100
+		cfg.BackendTimeout = time.Minute
+	})
+	staged := []byte("staged for the next pack")
+	if response := putCacheObject(server, "/cas/"+digest(staged), staged); response.Code != http.StatusNoContent {
+		t.Fatalf("CAS PUT = %d", response.Code)
+	}
+	flushed := make(chan error, 1)
+	go func() { flushed <- server.packs.flush(context.Background(), true) }()
+	<-backend.started
+
+	read := make(chan *httptest.ResponseRecorder, 1)
+	go func() { read <- readCacheObject(server, "/cas/"+digest(restored)) }()
+	select {
+	case response := <-read:
+		if response.Code != http.StatusOK || response.Body.String() != string(restored) {
+			t.Fatalf("CAS GET = %d, body = %q", response.Code, response.Body.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a pack read waited for an unrelated upload")
+	}
+
+	close(backend.release)
+	if err := <-flushed; err != nil {
+		t.Fatal(err)
+	}
+	closePackedServer(t, server)
 }
 
 func TestManifestReadConcurrencyRaisesButNeverLowers(t *testing.T) {
