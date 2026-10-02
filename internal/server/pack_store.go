@@ -185,14 +185,7 @@ func (p *packStore) stageAction(digest string, value object, closure []digestRef
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if existing, exists := p.pendingActions[digest]; exists {
-		if existing.cid != contentCID.String() {
-			// A single runner produced two different values for one action key.
-			// Do not publish either value; silently choosing one would make a
-			// non-deterministic action look cacheable.
-			delete(p.pendingActions, digest)
-			p.actionConflicts[digest] = struct{}{}
-		}
+	if _, exists := p.pendingActions[digest]; exists {
 		return nil
 	}
 	p.pendingActions[digest] = pendingAction{
@@ -236,11 +229,6 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 		contentCID, blockCID, encoding = entry.CID, entry.Block, entry.Encoding
 		packID, expectedSize = entry.PackID, entry.Size
 	} else {
-		if _, conflict := p.actionConflicts[digest]; conflict {
-			p.server.stats.actionDigestConflicts.Add(1)
-			p.mu.Unlock()
-			return object{}, false, nil
-		}
 		entry, found := p.actions[digest]
 		if !found {
 			p.mu.Unlock()
@@ -995,6 +983,11 @@ func (p *packStore) discover(ctx context.Context) error {
 		len(p.listedPacks), len(manifests), len(live),
 		time.Since(started).Round(time.Millisecond),
 		listed.Round(time.Millisecond), loadedIn.Round(time.Millisecond))
+	if conflicts := len(p.actionConflicts); conflicts > 0 {
+		p.server.cfg.Logger.Printf(
+			"warning: %d action keys have more than one stored result; serving the copy in the lowest pack ID. Overlapping writers or non-hermetic actions cause this",
+			conflicts)
+	}
 	return nil
 }
 
@@ -1042,13 +1035,16 @@ func (p *packStore) applyManifestLocked(id string, value manifest) {
 	}
 	for _, action := range value.Actions {
 		declared += action.Size
-		if existing, found := p.actions[action.Digest]; found {
-			if existing.CID != action.CID {
+		existing, found := p.actions[action.Digest]
+		if found && existing.CID != action.CID {
+			if _, counted := p.actionConflicts[action.Digest]; !counted {
 				p.actionConflicts[action.Digest] = struct{}{}
+				p.server.stats.actionDigestConflicts.Add(1)
 			}
-			continue
 		}
-		p.actions[action.Digest] = action
+		if !found || preferAction(action, existing) {
+			p.actions[action.Digest] = action
+		}
 	}
 	// Two manifests naming one pack describe identical content, so the first
 	// wins rather than the total being counted twice.
@@ -1080,6 +1076,16 @@ func preferPack(candidate, existing packDescriptor) bool {
 
 func preferObject(candidate, existing manifestObject) bool {
 	return candidate.PackID < existing.PackID
+}
+
+// preferAction picks one of several stored results for an action key. Any of
+// them is a valid REAPI answer; refusing all of them would make the key a
+// permanent miss, since every re-execution uploads yet another distinct result.
+func preferAction(candidate, existing manifestAction) bool {
+	if candidate.PackID != existing.PackID {
+		return candidate.PackID < existing.PackID
+	}
+	return candidate.CID < existing.CID
 }
 
 func parseManifestKey(prefix, key string) (string, string, bool) {

@@ -96,10 +96,12 @@ Manifest {
 
 Entries are deltas introduced by that manifest, not a full copy of every
 ancestor. A reader merges them from the roots toward the heads. The mapping
-must be deterministic: the same CAS digest always denotes identical bytes. Two
-different Action Result values for one Action Digest indicate a non-deterministic
-build and are not silently selected; the adapter reports a cache miss and logs
-the conflict.
+must be deterministic: the same CAS digest always denotes identical bytes. One
+Action Digest may carry several different Action Result values, because Bazel
+records execution timestamps in every result and overlapping writers each
+upload one. Any of them is a valid answer, so the adapter serves the copy in
+the lowest pack ID, counts the key in `action_digest_conflicts`, and logs a
+warning. The optimiser treats the other copies as dead, so they are reclaimed.
 
 Using [CARv2][go-car] and [IPLD][go-ipld] avoids inventing either a packed
 content-addressed file format or a graph serialization and traversal format.
@@ -185,7 +187,7 @@ Required tests include:
   checkpoint.
 - Visibility ordering: a manifest cannot be resolved before its pack exists.
 - Missing or corrupt pack and incomplete closure behaviour, all as cache misses.
-- Action Digest conflict detection.
+- Deterministic resolution of Action Digest conflicts.
 - GitHub-cache API discovery pagination, unavailable API handling, and scoped
   branch/default-branch reads.
 - An end-to-end cold seed followed by a fresh-runner warm restore, measuring

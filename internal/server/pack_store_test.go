@@ -486,7 +486,7 @@ func TestPackedStoreActionResultHitRenewsItsClosurePacks(t *testing.T) {
 	}
 }
 
-func TestPackedStoreRejectsConflictingActionResults(t *testing.T) {
+func TestPackedStoreServesOneOfConflictingActionResults(t *testing.T) {
 	backend := newMemoryBackend()
 	writerA := testPackedServer(t, backend)
 	writerB := testPackedServer(t, backend)
@@ -500,13 +500,35 @@ func TestPackedStoreRejectsConflictingActionResults(t *testing.T) {
 	closePackedServer(t, writerA)
 	closePackedServer(t, writerB)
 
-	restore := testPackedServer(t, backend)
-	defer closePackedServer(t, restore)
-	if response := readCacheObject(restore, "/ac/"+actionDigest); response.Code != http.StatusNotFound {
-		t.Fatalf("conflicting action result = %d", response.Code)
+	var served []byte
+	for range 2 {
+		restore := testPackedServer(t, backend)
+		response := readCacheObject(restore, "/ac/"+actionDigest)
+		if response.Code != http.StatusOK {
+			t.Fatalf("conflicting action result = %d", response.Code)
+		}
+		if restore.Snapshot().ActionDigestConflicts != 1 {
+			t.Fatalf("conflict was not reported: %+v", restore.Snapshot())
+		}
+		if served != nil && !bytes.Equal(served, response.Body.Bytes()) {
+			t.Fatalf("restores disagree on the served result: %x and %x", served, response.Body.Bytes())
+		}
+		served = response.Body.Bytes()
+		closePackedServer(t, restore)
 	}
-	if restore.Snapshot().ActionDigestConflicts != 1 {
-		t.Fatalf("conflict was not reported: %+v", restore.Snapshot())
+
+	servedCID, err := rawCIDForData(served)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inLayout bool
+	for _, entry := range readLayout(t, backend).Entries {
+		if entry.Kind == "ac" && entry.Digest == actionDigest && entry.CID == servedCID.String() {
+			inLayout = true
+		}
+	}
+	if !inLayout {
+		t.Fatal("the layout does not resolve the action to the served result")
 	}
 }
 

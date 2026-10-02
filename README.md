@@ -528,7 +528,7 @@ Supported by both:
 - immutable cache keys
 - per-job coalescing of duplicate immutable uploads before rate limiting and backend publication
 - opt-in CARv2 archives with footer indexes, DAG-CBOR manifests, concurrent
-  writer head merging, and action-result conflict detection
+  writer head merging, and deterministic resolution of conflicting action results
 
 Not currently supported:
 
