@@ -88,7 +88,7 @@ function buildSummary(stats) {
     ["Orphaned manifests", count("manifests_orphaned")],
     ["Manifest discovery errors", count("manifest_discovery_errors")],
     ["Manifest load errors", count("manifest_load_errors")],
-    ["Action-digest conflicts", count("action_digest_conflicts")],
+    ["Action keys with several results", count("action_digest_conflicts")],
     ["Validated action results", count("validated_action_results")],
     ["Incomplete action results", count("incomplete_action_results")],
     ["Invalid action results", count("invalid_action_results")],

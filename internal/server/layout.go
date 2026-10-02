@@ -185,13 +185,13 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 		for _, action := range value.Actions {
 			declaredBytes[action.PackID] += action.Size
 			declaredCount[action.PackID]++
-			if existing, found := actionWinners[action.Digest]; found {
-				if existing.CID != action.CID {
-					conflicts[action.Digest] = struct{}{}
-				}
-				continue
+			existing, found := actionWinners[action.Digest]
+			if found && existing.CID != action.CID {
+				conflicts[action.Digest] = struct{}{}
 			}
-			actionWinners[action.Digest] = action
+			if !found || preferAction(action, existing) {
+				actionWinners[action.Digest] = action
+			}
 		}
 	}
 	for packID := range listedPacks {
@@ -233,12 +233,10 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 			Encoding: object.Encoding, Pack: object.PackID, Size: object.Size,
 		})
 	}
+	if len(conflicts) > 0 {
+		options.Warn("%d action keys have more than one stored result; only the served copy is kept", len(conflicts))
+	}
 	for _, action := range actionWinners {
-		// A digest two jobs disagree about is never served, so it is not part of
-		// the layout a reader sees and must not be repacked as though it were.
-		if _, conflict := conflicts[action.Digest]; conflict {
-			continue
-		}
 		layout.Entries = append(layout.Entries, LayoutEntry{
 			Kind: "ac", Digest: action.Digest, CID: action.CID, Block: action.Block,
 			Encoding: action.Encoding, Pack: action.PackID, Size: action.Size,
