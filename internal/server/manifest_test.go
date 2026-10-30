@@ -69,3 +69,39 @@ func TestManifestRejectsTamperedCID(t *testing.T) {
 		t.Fatal("tampered manifest was accepted")
 	}
 }
+
+// A pack of many small objects yields a manifest past the DAG-CBOR decoder's
+// default allocation budget; it must still round-trip.
+func TestManifestWithManyEntriesDecodes(t *testing.T) {
+	packID := digest([]byte("pack"))
+	value := manifest{
+		Version: manifestFormatVersion,
+		Parents: []string{},
+		Packs:   []packDescriptor{{ID: packID, Key: packKeyFor("test", packID), Size: 1}},
+	}
+	for i := 0; i < 60000; i++ {
+		data := []byte{byte(i), byte(i >> 8), byte(i >> 16)}
+		casCID, err := rawCIDForData(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		value.CAS = append(value.CAS, manifestObject{
+			Digest: digest(data),
+			CID:    casCID.String(),
+			Block:  casCID.String(),
+			PackID: packID,
+			Size:   int64(len(data)),
+		})
+	}
+	encoded, manifestCID, err := encodeManifest(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeManifest(encoded, manifestCID)
+	if err != nil {
+		t.Fatalf("decode %d-byte manifest: %v", len(encoded), err)
+	}
+	if len(decoded.CAS) != len(value.CAS) {
+		t.Fatalf("decoded %d CAS entries, want %d", len(decoded.CAS), len(value.CAS))
+	}
+}

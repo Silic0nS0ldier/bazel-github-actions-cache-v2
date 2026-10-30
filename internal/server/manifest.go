@@ -21,6 +21,8 @@ import (
 const (
 	manifestFormatVersion    = 2
 	minManifestFormatVersion = 1
+
+	manifestMinDecodeBudget int64 = 10 << 20
 )
 
 type manifest struct {
@@ -85,7 +87,17 @@ func decodeManifest(data []byte, expectedCID string) (manifest, error) {
 			return manifest{}, fmt.Errorf("manifest CID mismatch: expected %s, got %s", expectedCID, actual)
 		}
 	}
-	node, err := ipld.Decode(data, dagcbor.Decode)
+	// The decoder's default allocation budget (~10M units) rejects manifests for
+	// packs of many small objects. Well-formed DAG-CBOR is charged at most ~6
+	// units per input byte, and the input is already in memory, so scaling the
+	// budget with its length admits any valid manifest while still bounding
+	// amplification.
+	budget := int64(len(data)) * 8
+	if budget < manifestMinDecodeBudget {
+		budget = manifestMinDecodeBudget
+	}
+	decoder := dagcbor.DecodeOptions{AllowLinks: true, AllocationBudget: budget}
+	node, err := ipld.Decode(data, decoder.Decode)
 	if err != nil {
 		return manifest{}, fmt.Errorf("decode DAG-CBOR manifest: %w", err)
 	}
