@@ -1,0 +1,13 @@
+{
+	"name": "bazel-github-actions-cache-v2s",
+	"image": "mcr.microsoft.com/devcontainers/go:2-1.27-trixie",
+	"features": {
+    	"ghcr.io/devcontainers/features/github-cli:1": {}
+	},
+	"initializeCommand": {
+        "gh-cli-auth": "gh auth token > .git/__gh_token || true"
+    },
+    "postStartCommand": {
+        "gh-cli-auth": "test -s .git/__gh_token && gh auth login --with-token < .git/__gh_token || true"
+    }
+}
