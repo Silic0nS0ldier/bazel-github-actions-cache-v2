@@ -87,9 +87,21 @@ function writeJobSummary(result) {
     ["Packs rebuilt", count(result.Rebuilt)],
     ["Packs deleted", count(result.Deleted)],
     ["Packs reaped", count(result.Reaped)],
+    ["Manifests whose pack is gone", count(result.OrphanManifests)],
+    ["Of those, reaped", count(result.ReapedManifests)],
     ["Published", bytes(result.PublishedBytes)],
     ["Stopped at the byte budget", yesNo(result.Incomplete)],
     ["Wasted per restore", bytes(result.WastedBytes)],
+    ["Usage records in the eviction window", count(result.RecordsInWindow)],
+    ["Packs cleaned of stale entries", count(result.Evicted)],
+    ["Stale entries evicted", `${count(result.EvictedEntries)} (${bytes(result.EvictedBytes)})`],
+    ["Wholly stale packs left to expire", count(result.Abandoned)],
+    ["Packs old enough to reshape", count(result.ReshapeEligible)],
+    ["Overfetch per job before", bytes(result.OverfetchBefore)],
+    ["Overfetch per job after", bytes(result.OverfetchAfter)],
+    ["Downloads per job before", (result.DownloadsBefore ?? 0).toFixed(1)],
+    ["Downloads per job after", (result.DownloadsAfter ?? 0).toFixed(1)],
+    ["Wasteful packs no regrouping improves", count(result.Unimproved)],
     ["Reclaimed", bytes(result.ReclaimedBytes)],
     ["Dry run", yesNo(result.DryRun)],
   ];
@@ -97,6 +109,8 @@ function writeJobSummary(result) {
     "### Bazel cache layout",
     "",
     ...(result.Skipped ? [`Nothing to do: ${result.Skipped}.`, ""] : []),
+    ...(result.EvictionSkipped ? [`Evicting nothing: ${result.EvictionSkipped}.`, ""] : []),
+    ...(result.ReshapeSkipped ? [`Not reshaping: ${result.ReshapeSkipped}.`, ""] : []),
     "| Measure | Value |",
     "| --- | ---: |",
     ...rows.map(([label, value]) => `| ${label} | ${value} |`),
@@ -164,6 +178,12 @@ async function main() {
   const reapOlderThanSeconds = reapAge("reap-older-than-hours", 24, 8760);
   const backendTimeoutSeconds = positiveInteger("backend-timeout-seconds", 300, 3600);
   const minWasteFraction = fraction("min-waste-fraction", 0.25);
+  const minImprovement = fraction("min-improvement", 0.25);
+  const evictAfterHours = positiveInteger("evict-after-hours", 168, 8760);
+  const downloadOverheadMB = Number.parseInt(input("download-overhead-mb", "8"), 10);
+  if (!Number.isSafeInteger(downloadOverheadMB) || downloadOverheadMB < 0 || downloadOverheadMB > 1024) {
+    throw new Error("download-overhead-mb must be an integer between 0 and 1024");
+  }
   const dryRun = parseBoolean(input("dry-run", "false"), "dry-run");
   const jobSummary = parseBoolean(input("job-summary", "true"), "job-summary");
   if (!dryRun) {
@@ -207,6 +227,12 @@ async function main() {
     String(packSizeMB * 1024 * 1024),
     "--min-waste-fraction",
     String(minWasteFraction),
+    "--min-improvement",
+    String(minImprovement),
+    "--evict-after",
+    `${evictAfterHours}h`,
+    "--download-overhead",
+    String(downloadOverheadMB * 1024 * 1024),
     "--max-blob-size",
     String(maxBlobSizeMB * 1024 * 1024),
     "--uploads-per-minute",

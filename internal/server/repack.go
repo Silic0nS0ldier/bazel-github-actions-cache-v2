@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/cre4ture/bazel-github-actions-cache-v2/internal/cache"
@@ -16,18 +17,26 @@ import (
 // Repacker rebuilds packs out of existing ones. It only ever adds: a new pack
 // and its manifest leave the originals readable, so failing part way through
 // costs storage rather than cache hits.
+//
+// Publish may be called concurrently. Calls that need the same source pack
+// share one download of it.
 type Repacker struct {
 	options RepackOptions
-	sources map[string]*sourcePack
 	packs   map[string]LayoutPack
 	limiter *intervalLimiter
+
+	mu      sync.Mutex
+	sources map[string]*sourcePack
 }
 
 // sourcePack is a pack being copied out of, held open so that moving its blocks
-// does not reopen and re-index the archive once per block.
+// does not reopen and re-index the archive once per block. ready closes once
+// the download has finished, successfully or not.
 type sourcePack struct {
+	ready chan struct{}
 	path  string
 	store *blockstore.ReadOnly
+	err   error
 }
 
 type RepackOptions struct {
@@ -76,20 +85,28 @@ func NewRepacker(options RepackOptions) (*Repacker, error) {
 }
 
 // Release drops a source pack this repacker no longer needs, freeing the local
-// copy. Calling it for a pack still to be read simply costs a second download.
+// copy. Calling it for a pack still to be read simply costs a second download,
+// but it must not race a Publish that is reading the pack.
 func (r *Repacker) Release(packID string) {
+	r.mu.Lock()
 	source, held := r.sources[packID]
+	delete(r.sources, packID)
+	r.mu.Unlock()
 	if !held {
 		return
 	}
-	delete(r.sources, packID)
-	_ = source.store.Close()
-	os.Remove(source.path)
+	<-source.ready
+	if source.store != nil {
+		_ = source.store.Close()
+		os.Remove(source.path)
+	}
 }
 
 // Publish writes the entries into one new pack and commits a manifest for it.
-// Entries still name the pack they are being copied out of.
-func (r *Repacker) Publish(ctx context.Context, entries []LayoutEntry) (LayoutPack, string, error) {
+// Entries still name the pack they are being copied out of. A non-zero since
+// is recorded as when the pack's contents took their shape; zero leaves the
+// pack's own creation time to stand for it.
+func (r *Repacker) Publish(ctx context.Context, entries []LayoutEntry, since time.Time) (LayoutPack, string, error) {
 	if len(entries) == 0 {
 		return LayoutPack{}, "", errors.New("cannot publish an empty pack")
 	}
@@ -156,6 +173,9 @@ func (r *Repacker) Publish(ctx context.Context, entries []LayoutEntry) (LayoutPa
 		Key:        packKeyFor(r.options.KeyPrefix, packID),
 		StoredSize: info.Size(),
 	}
+	if !since.IsZero() {
+		pack.Since = since.UTC().Truncate(time.Second)
+	}
 	// The pack goes first so no manifest ever advertises data a reader cannot
 	// restore, which is the same ordering the cache server commits with.
 	if err := r.publishFile(ctx, pack.Key, path, pack.StoredSize); err != nil {
@@ -173,7 +193,7 @@ func (r *Repacker) publishManifest(ctx context.Context, pack LayoutPack, entries
 	value := manifest{
 		Version: manifestFormatVersion,
 		Parents: append([]string(nil), r.options.Parents...),
-		Packs:   []packDescriptor{{ID: pack.ID, Key: pack.Key, Size: pack.StoredSize}},
+		Packs:   []packDescriptor{{ID: pack.ID, Key: pack.Key, Size: pack.StoredSize, Since: unixOrZero(pack.Since)}},
 	}
 	for _, entry := range entries {
 		switch entry.Kind {
@@ -213,6 +233,13 @@ func (r *Repacker) publishManifest(ctx context.Context, pack LayoutPack, entries
 	return manifestID, nil
 }
 
+func unixOrZero(at time.Time) int64 {
+	if at.IsZero() {
+		return 0
+	}
+	return at.Unix()
+}
+
 func (r *Repacker) readBlock(ctx context.Context, entry LayoutEntry) ([]byte, error) {
 	source, err := r.source(ctx, entry.Pack)
 	if err != nil {
@@ -224,21 +251,55 @@ func (r *Repacker) readBlock(ctx context.Context, entry LayoutEntry) ([]byte, er
 }
 
 func (r *Repacker) source(ctx context.Context, packID string) (*sourcePack, error) {
-	if source, found := r.sources[packID]; found {
+	r.mu.Lock()
+	source, found := r.sources[packID]
+	if !found {
+		source = &sourcePack{ready: make(chan struct{})}
+		r.sources[packID] = source
+	}
+	r.mu.Unlock()
+	if found {
+		select {
+		case <-source.ready:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if source.err != nil {
+			return nil, source.err
+		}
 		return source, nil
 	}
+
+	source.path, source.store, source.err = r.load(ctx, packID)
+	if source.err != nil {
+		// Forgotten so that a later call retries rather than inheriting a
+		// failure that may have been this call's cancelled context.
+		r.mu.Lock()
+		if r.sources[packID] == source {
+			delete(r.sources, packID)
+		}
+		r.mu.Unlock()
+	}
+	close(source.ready)
+	if source.err != nil {
+		return nil, source.err
+	}
+	return source, nil
+}
+
+func (r *Repacker) load(ctx context.Context, packID string) (string, *blockstore.ReadOnly, error) {
 	descriptor, known := r.packs[packID]
 	if !known {
-		return nil, fmt.Errorf("no descriptor for source pack %s", packID)
+		return "", nil, fmt.Errorf("no descriptor for source pack %s", packID)
 	}
 	path, err := writePrivateTemp(r.options.CacheDir, "source-*", nil)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY, 0o600)
 	if err != nil {
 		os.Remove(path)
-		return nil, err
+		return "", nil, err
 	}
 	loadCtx, cancel := context.WithTimeout(ctx, r.options.Timeout)
 	found, loadErr := r.options.Backend.Load(loadCtx, descriptor.Key, file)
@@ -247,31 +308,29 @@ func (r *Repacker) source(ctx context.Context, packID string) (*sourcePack, erro
 	if loadErr != nil || closeErr != nil || !found {
 		os.Remove(path)
 		if loadErr != nil {
-			return nil, loadErr
+			return "", nil, loadErr
 		}
 		if closeErr != nil {
-			return nil, closeErr
+			return "", nil, closeErr
 		}
-		return nil, fmt.Errorf("source pack %s is gone", packID)
+		return "", nil, fmt.Errorf("source pack %s is gone", packID)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		os.Remove(path)
-		return nil, err
+		return "", nil, err
 	}
 	if info.Size() != descriptor.StoredSize {
 		os.Remove(path)
-		return nil, fmt.Errorf("source pack %s has size %d; the manifest declares %d",
+		return "", nil, fmt.Errorf("source pack %s has size %d; the manifest declares %d",
 			packID, info.Size(), descriptor.StoredSize)
 	}
 	store, err := openPackReader(path, r.options.MaxBlobSize)
 	if err != nil {
 		os.Remove(path)
-		return nil, err
+		return "", nil, err
 	}
-	source := &sourcePack{path: path, store: store}
-	r.sources[packID] = source
-	return source, nil
+	return path, store, nil
 }
 
 func (r *Repacker) publishFile(ctx context.Context, key, path string, size int64) error {
@@ -288,9 +347,16 @@ func (r *Repacker) publishFile(ctx context.Context, key, path string, size int64
 	return r.options.Backend.Save(saveCtx, key, file, size)
 }
 
-// Close removes the source packs this repacker spooled locally.
+// Close removes the source packs this repacker spooled locally. No Publish may
+// be running.
 func (r *Repacker) Close() error {
+	r.mu.Lock()
+	held := make([]string, 0, len(r.sources))
 	for packID := range r.sources {
+		held = append(held, packID)
+	}
+	r.mu.Unlock()
+	for _, packID := range held {
 		r.Release(packID)
 	}
 	return nil

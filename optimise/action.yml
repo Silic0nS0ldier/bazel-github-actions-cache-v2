@@ -17,7 +17,7 @@ inputs:
     required: false
     default: bazel-cache-usage
   max-records:
-    description: "How many recent runs to plan from"
+    description: "How many recent usage records to plan from; each job that uses the cache publishes one"
     required: false
     default: "25"
   min-runs:
@@ -30,6 +30,18 @@ inputs:
     default: "8"
   min-waste-fraction:
     description: "How much of a pack must be bytes an average restore pays for and does not want before rebuilding it (0-1)"
+    required: false
+    default: "0.25"
+  evict-after-hours:
+    description: "Evict entries no job has used for this long, rewriting each affected pack on its own and keeping its age. Defaults to GitHub's 7-day expiry of unused caches. Packs are only reshaped once twice this old"
+    required: false
+    default: "168"
+  download-overhead-mb:
+    description: "Fixed cost of restoring one pack, in MiB it is worth; what makes reshaping merge small packs to cut downloads"
+    required: false
+    default: "8"
+  min-improvement:
+    description: "How much of a wasteful pack's overfetch its rebuild must remove, judged on recent runs the regrouping was not fitted to (0-1). Stops a pass rebuilding packs no grouping can improve"
     required: false
     default: "0.25"
   max-blob-size-mb:
@@ -45,11 +57,11 @@ inputs:
     required: false
     default: "180"
   reap-unmanifested-packs:
-    description: "Delete packs that no manifest names at all. These are unreachable, but this is the one thing here that removes data without publishing a replacement"
+    description: "Delete packs that no manifest names at all, and manifests whose pack is gone. Both are unreachable, but this is the one thing here that removes data without publishing a replacement"
     required: false
     default: "false"
   reap-older-than-hours:
-    description: "Only reap packs older than this, so a pack a running job has published but not yet committed a manifest for is out of reach. Fractions are allowed; anything under an hour is for testing only"
+    description: "Only reap packs and manifests older than this, so a pack a running job has published but not yet committed a manifest for is out of reach. Fractions are allowed; anything under an hour is for testing only"
     required: false
     default: "24"
   backend-timeout-seconds:

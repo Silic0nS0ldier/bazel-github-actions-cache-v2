@@ -25,7 +25,28 @@ type EntryLister interface {
 // pack whose manifest was lost from one a running job has published but not yet
 // committed a manifest for.
 func reap(ctx context.Context, options RunOptions, layout server.Layout) (int, int, error) {
-	if len(layout.UnmanifestedPacks) == 0 {
+	keys := make([]string, 0, len(layout.UnmanifestedPacks))
+	for _, pack := range layout.UnmanifestedPacks {
+		keys = append(keys, pack.Key)
+	}
+	return reapKeys(ctx, options, server.PackKeyPrefix(options.KeyPrefix), "unmanifested packs", keys)
+}
+
+// reapManifests deletes manifests whose pack is gone. Readers already skip
+// them, and they would expire unread within a week, but until then they take
+// quota from a cache whose packs are being evicted for want of it. The age
+// threshold covers a listing taken between a job publishing a pack and that
+// pack appearing in the listing.
+func reapManifests(ctx context.Context, options RunOptions, layout server.Layout) (int, int, error) {
+	keys := make([]string, 0, len(layout.PacklessManifests))
+	for _, manifest := range layout.PacklessManifests {
+		keys = append(keys, manifest.Key)
+	}
+	return reapKeys(ctx, options, server.ManifestKeyPrefix(options.KeyPrefix), "manifests whose pack is gone", keys)
+}
+
+func reapKeys(ctx context.Context, options RunOptions, listPrefix, noun string, keys []string) (int, int, error) {
+	if len(keys) == 0 {
 		return 0, 0, nil
 	}
 	if options.Lister == nil {
@@ -35,9 +56,9 @@ func reap(ctx context.Context, options RunOptions, layout server.Layout) (int, i
 		return 0, 0, fmt.Errorf("reaping needs a positive age threshold")
 	}
 
-	entries, err := options.Lister.ListEntries(ctx, server.PackKeyPrefix(options.KeyPrefix))
+	entries, err := options.Lister.ListEntries(ctx, listPrefix)
 	if err != nil {
-		return 0, 0, fmt.Errorf("list packs for reaping: %w", err)
+		return 0, 0, fmt.Errorf("list %s for reaping: %w", noun, err)
 	}
 	created := make(map[string]time.Time, len(entries))
 	for _, entry := range entries {
@@ -48,8 +69,8 @@ func reap(ctx context.Context, options RunOptions, layout server.Layout) (int, i
 	reapable := 0
 	deleted := 0
 	tooYoung := 0
-	for _, pack := range layout.UnmanifestedPacks {
-		at, known := created[pack.Key]
+	for _, key := range keys {
+		at, known := created[key]
 		// An entry with no creation time is left alone: without it there is no
 		// way to tell it apart from one being written right now.
 		if !known || at.IsZero() || at.After(cutoff) {
@@ -60,14 +81,14 @@ func reap(ctx context.Context, options RunOptions, layout server.Layout) (int, i
 		if options.DryRun {
 			continue
 		}
-		if err := options.Pruner.Delete(ctx, pack.Key); err != nil {
-			return reapable, deleted, fmt.Errorf("reap pack %s: %w", pack.ID, err)
+		if err := options.Pruner.Delete(ctx, key); err != nil {
+			return reapable, deleted, fmt.Errorf("reap %s: %w", key, err)
 		}
 		deleted++
 	}
 	if tooYoung > 0 {
-		options.Log("left %d unmanifested packs alone: newer than %s, or with no known creation time",
-			tooYoung, options.ReapOlderThan)
+		options.Log("left %d %s alone: newer than %s, or with no known creation time",
+			tooYoung, noun, options.ReapOlderThan)
 	}
 	return reapable, deleted, nil
 }

@@ -33,10 +33,15 @@ type manifest struct {
 	Actions []manifestAction
 }
 
+// Since, when set, is when the pack's contents took their current shape, in
+// Unix seconds. A pack rewritten only to drop stale entries keeps its source's
+// value, so dropping entries never makes a pack look newly shaped. Readers
+// that predate it ignore it.
 type packDescriptor struct {
-	ID   string
-	Key  string
-	Size int64
+	ID    string
+	Key   string
+	Size  int64
+	Since int64
 }
 
 // Block names the stored bytes, which differ from CID when Encoding is set.
@@ -239,7 +244,11 @@ func assembleManifestPacks(assembler datamodel.MapAssembler, packs []packDescrip
 		return err
 	}
 	for _, pack := range packs {
-		mapAssembler, err := list.AssembleValue().BeginMap(3)
+		fields := int64(3)
+		if pack.Since > 0 {
+			fields++
+		}
+		mapAssembler, err := list.AssembleValue().BeginMap(fields)
 		if err != nil {
 			return err
 		}
@@ -251,6 +260,11 @@ func assembleManifestPacks(assembler datamodel.MapAssembler, packs []packDescrip
 		}
 		if err := assembleInt(mapAssembler, "size", pack.Size); err != nil {
 			return err
+		}
+		if pack.Since > 0 {
+			if err := assembleInt(mapAssembler, "since", pack.Since); err != nil {
+				return err
+			}
 		}
 		if err := mapAssembler.Finish(); err != nil {
 			return err
@@ -329,7 +343,7 @@ func (value manifest) validate() error {
 	}
 	packIDs := make(map[string]struct{}, len(value.Packs))
 	for _, pack := range value.Packs {
-		if !digestPattern.MatchString(pack.ID) || pack.Size <= 0 || pack.Key == "" || pack.Key != packKeyFor("", pack.ID) && !stringsHasSuffix(pack.Key, "-car-pack-v1-"+pack.ID) {
+		if !digestPattern.MatchString(pack.ID) || pack.Size <= 0 || pack.Since < 0 || pack.Key == "" || pack.Key != packKeyFor("", pack.ID) && !stringsHasSuffix(pack.Key, "-car-pack-v1-"+pack.ID) {
 			return errors.New("manifest has invalid pack descriptor")
 		}
 		if _, duplicate := packIDs[pack.ID]; duplicate {
@@ -406,7 +420,13 @@ func nodePacks(node datamodel.Node) ([]packDescriptor, error) {
 		if err != nil {
 			return nil, err
 		}
-		values = append(values, packDescriptor{ID: id, Key: key, Size: size})
+		var since int64
+		if _, err := item.LookupByString("since"); err == nil {
+			if since, err = nodeInt(item, "since"); err != nil {
+				return nil, err
+			}
+		}
+		values = append(values, packDescriptor{ID: id, Key: key, Size: size, Since: since})
 	}
 	return values, nil
 }

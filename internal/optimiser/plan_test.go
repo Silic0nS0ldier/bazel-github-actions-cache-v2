@@ -51,17 +51,28 @@ func declare(id string, entries []Entry, extraDead int64) Pack {
 	}
 }
 
+// withBystander adds an old pack nothing downloads. Reshaping needs at least
+// two packs old enough, and the bystander is never worth rebuilding, so the
+// pack under test is what the plan is about.
+func withBystander(layout Layout) Layout {
+	bystander := []Entry{{Kind: "cas", Digest: "bystander", Pack: "pack-zz", Size: 1}}
+	layout.Packs = append(append([]Pack(nil), layout.Packs...), declare("pack-zz", bystander, 0))
+	layout.Entries = append(append([]Entry(nil), layout.Entries...), bystander...)
+	return layout
+}
+
 func testOptions() Options {
 	options := DefaultOptions()
 	options.TargetPackSize = 1000
 	options.MinRuns = 1
+	options.DownloadOverhead = 0
 	return options
 }
 
 // The whole pass exists to stop a restore paying for bytes nothing wanted.
 func TestPlanSeparatesHotEntriesFromColdOnes(t *testing.T) {
 	entries := entriesFor("pack-a", "cas", 4, 100)
-	layout := Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries}
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries})
 	demand := demandFrom(t, map[string][]server.UsageEntry{
 		"run-1": {downloaded("cas", entries[0].Digest), downloaded("cas", entries[1].Digest)},
 	})
@@ -118,7 +129,7 @@ func TestPlanLeavesUnmixedPacksAlone(t *testing.T) {
 // it costs a reader nothing and must not be treated as demand for the bytes.
 func TestPlanTreatsPresenceOnlyEntriesAsCold(t *testing.T) {
 	entries := entriesFor("pack-a", "cas", 4, 100)
-	layout := Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries}
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries})
 	demand := demandFrom(t, map[string][]server.UsageEntry{
 		"run-1": {checked("cas", entries[0].Digest), checked("cas", entries[1].Digest)},
 	})
@@ -136,7 +147,7 @@ func TestPlanTreatsPresenceOnlyEntriesAsCold(t *testing.T) {
 // one pack instead of several.
 func TestPlanGroupsEntriesWantedByTheSameRuns(t *testing.T) {
 	entries := entriesFor("pack-a", "cas", 4, 100)
-	layout := Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries}
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries})
 	demand := demandFrom(t, map[string][]server.UsageEntry{
 		"run-1": {downloaded("cas", entries[0].Digest), downloaded("cas", entries[2].Digest)},
 		"run-2": {downloaded("cas", entries[1].Digest), downloaded("cas", entries[3].Digest)},
@@ -168,7 +179,7 @@ func TestPlanNeverMixesKindsInOnePack(t *testing.T) {
 	blobs := entriesFor("pack-a", "cas", 2, 100)
 	actions := entriesFor("pack-a", "ac", 2, 10)
 	all := append(append([]Entry{}, blobs...), actions...)
-	layout := Layout{Packs: []Pack{declare("pack-a", all, 0)}, Entries: all}
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", all, 0)}, Entries: all})
 	demand := demandFrom(t, map[string][]server.UsageEntry{
 		"run-1": {downloaded("cas", blobs[0].Digest), downloaded("ac", actions[0].Digest)},
 	})
@@ -234,7 +245,7 @@ func TestPlanRefusesToDropAnEntry(t *testing.T) {
 
 func TestPlanRewritesEveryEntryOfARewrittenPack(t *testing.T) {
 	entries := entriesFor("pack-a", "cas", 40, 100)
-	layout := Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries}
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries})
 	observed := make([]server.UsageEntry, 0)
 	for index := 0; index < 10; index++ {
 		observed = append(observed, downloaded("cas", entries[index].Digest))
@@ -263,7 +274,7 @@ func TestPlanPlacesAnOversizedEntry(t *testing.T) {
 		{Kind: "cas", Digest: "big", Pack: "pack-a", Size: 5000},
 		{Kind: "cas", Digest: "small", Pack: "pack-a", Size: 10},
 	}
-	layout := Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries}
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries})
 	demand := demandFrom(t, map[string][]server.UsageEntry{
 		"run-1": {downloaded("cas", "big")},
 	})
@@ -285,7 +296,7 @@ func TestPlanPlacesAnOversizedEntry(t *testing.T) {
 // Planning from one job's record would chase that job's particular shape.
 func TestPlanRefusesTooSmallAWindow(t *testing.T) {
 	entries := entriesFor("pack-a", "cas", 2, 100)
-	layout := Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries}
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries})
 	demand := demandFrom(t, map[string][]server.UsageEntry{"run-1": nil})
 
 	options := testOptions()
@@ -321,4 +332,122 @@ func TestDemandSignatureNamesTheRunsThatDownloaded(t *testing.T) {
 		t.Fatalf("runs = %d", demand.Runs())
 	}
 
+}
+
+// A pack can be over the waste threshold and still be the best grouping its
+// entries allow. Rebuilding it anyway is what made every pass redo the last.
+func TestPlanLeavesAPackNoRegroupingImproves(t *testing.T) {
+	entries := entriesFor("pack-a", "cas", 2, 100)
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries})
+	demand := demandFrom(t, map[string][]server.UsageEntry{
+		"run-1": {downloaded("cas", entries[0].Digest), downloaded("cas", entries[1].Digest)},
+		"run-2": {downloaded("cas", entries[0].Digest)},
+	})
+
+	// Splitting would spare run-2 the 100 bytes it does not want, at the cost
+	// of a second download for run-1 worth exactly as much.
+	options := testOptions()
+	options.DownloadOverhead = 100
+	plan, err := NewPlan(layout, demand, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Empty() || plan.Unimproved != 1 {
+		t.Fatalf("plan = %+v, want the pack left alone as unimproved", plan)
+	}
+}
+
+// Judged on the runs it was fitted to, any regrouping looks better. Only runs
+// held out of the fit say whether a later job would gain anything.
+func TestPlanJudgesARegroupingOnRunsItWasNotFittedTo(t *testing.T) {
+	entries := entriesFor("pack-a", "cas", 4, 100)
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", entries, 0)}, Entries: entries})
+	all := make([]server.UsageEntry, 0, len(entries))
+	for _, entry := range entries {
+		all = append(all, downloaded("cas", entry.Digest))
+	}
+	// run-4 is held out, and wants the whole pack.
+	demand := demandFrom(t, map[string][]server.UsageEntry{
+		"run-1": {downloaded("cas", entries[0].Digest)},
+		"run-2": {downloaded("cas", entries[1].Digest)},
+		"run-3": {downloaded("cas", entries[2].Digest)},
+		"run-4": all,
+	})
+
+	plan, err := NewPlan(layout, demand, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Empty() {
+		t.Fatalf("plan = %+v, want no rebuild the held-out run would not gain from", plan)
+	}
+}
+
+func TestPlanRebuildsWhatHeldOutRunsWouldGainFrom(t *testing.T) {
+	first := entriesFor("pack-a", "cas", 2, 300)
+	second := entriesFor("pack-a", "ac", 2, 300)
+	for index := range second {
+		second[index].Kind = "cas"
+	}
+	all := append(append([]Entry{}, first...), second...)
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", all, 0)}, Entries: all})
+	// Two kinds of job alternate; the held-out run-4 and run-8 are both the second.
+	runs := make(map[string][]server.UsageEntry)
+	for run := 1; run <= 8; run++ {
+		wanted := first
+		if run%2 == 0 {
+			wanted = second
+		}
+		for _, entry := range wanted {
+			runs["run-"+strconv.Itoa(run)] = append(runs["run-"+strconv.Itoa(run)], downloaded("cas", entry.Digest))
+		}
+	}
+	demand := demandFrom(t, runs)
+
+	plan, err := NewPlan(layout, demand, testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Rewrite) != 1 || len(plan.Groups) != 2 {
+		t.Fatalf("plan = %+v, want the two jobs' entries split apart", plan)
+	}
+	if plan.OverfetchBefore != 600 || plan.OverfetchAfter != 0 {
+		t.Fatalf("overfetch per job %d -> %d, want 600 -> 0", plan.OverfetchBefore, plan.OverfetchAfter)
+	}
+}
+
+// A small remainder wanted by fewer jobs joins the pack rather than costing
+// the jobs that want it one more download.
+func TestPlanFillsPacksWithEntriesTheSameJobsWant(t *testing.T) {
+	entries := entriesFor("pack-a", "cas", 6, 100)
+	cold := entriesFor("pack-a", "ac", 4, 100)
+	for index := range cold {
+		cold[index].Kind = "cas"
+	}
+	all := append(append([]Entry{}, entries...), cold...)
+	layout := withBystander(Layout{Packs: []Pack{declare("pack-a", all, 0)}, Entries: all})
+	demand := demandFrom(t, map[string][]server.UsageEntry{
+		"run-1": {downloaded("cas", entries[0].Digest), downloaded("cas", entries[1].Digest), downloaded("cas", entries[2].Digest),
+			downloaded("cas", entries[3].Digest), downloaded("cas", entries[4].Digest)},
+		"run-2": {downloaded("cas", entries[0].Digest), downloaded("cas", entries[1].Digest), downloaded("cas", entries[2].Digest),
+			downloaded("cas", entries[3].Digest), downloaded("cas", entries[4].Digest), downloaded("cas", entries[5].Digest)},
+	})
+
+	// Merging the remainder saves run-2 a download worth more than the 100
+	// bytes it costs run-1.
+	options := testOptions()
+	options.DownloadOverhead = 200
+	plan, err := NewPlan(layout, demand, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hot []Group
+	for _, group := range plan.Groups {
+		if group.Signature != "" {
+			hot = append(hot, group)
+		}
+	}
+	if len(hot) != 1 || len(hot[0].Entries) != 6 {
+		t.Fatalf("hot groups = %+v, want the remainder folded into one pack", hot)
+	}
 }

@@ -325,20 +325,61 @@ deleting anything, and never even constructs a client that can delete:
           dry-run: true
 ```
 
-Entries are grouped by the set of runs that downloaded them, so entries wanted
-by the same jobs share a pack and entries nothing downloads are moved out of the
-way. A pack is only rebuilt when `min-waste-fraction` of it is bytes an average
-restore pays for and does not want.
+A pass rewrites packs in two independent ways, both gated by pack age.
+
+**Eviction** removes entries no job has used for `evict-after-hours`, which
+defaults to GitHub's own 7-day expiry of unused caches. An entry counts as used
+if any job downloaded it or checked that it exists. Readers check the outputs of
+every action result they serve, so outputs that are still needed stay. Each
+affected pack is rewritten on its own, without its stale entries, and nothing
+else moves. Only packs at least `evict-after-hours` old are considered, since a
+newer entry may simply not have been needed yet. A pack every entry of which is
+stale is left alone: nothing restores it, so GitHub expires it.
+
+Eviction needs every usage record from the whole window, so the pass reads all
+of them and not just the newest `max-records`. If any record in the window has
+expired or cannot be read, or the listing does not reach back past the start of
+the window, nothing is evicted and the job summary says why. An entry still
+referenced by an action result can be evicted only if no job has used that
+action result for the whole window either. Even then, the reader rejects the
+incomplete action result, so the cost is a cache miss, never a broken build.
+A job that publishes no record, because it was cancelled before its cleanup
+step or its usage artifact is disabled, is invisible here. Entries only it used
+can be evicted.
+
+**Reshaping** regroups packs whose shape is at least twice `evict-after-hours`
+old, and only when there are at least two: one pack can only have its contents
+shuffled. Entries are grouped by the set of runs that downloaded them, so
+entries wanted by the same jobs share a pack, entries nothing downloads are
+moved out of the way, and action results never share a pack with outputs.
+Restoring a pack is charged `download-overhead-mb` on top of its bytes, so small
+packs that the same jobs restore are merged into fewer downloads.
+
+A pack is considered for reshaping when `min-waste-fraction` of what a restore
+pays for, counting that overhead, is not wanted. It is only reshaped when the
+regrouping cuts its restore cost by `min-improvement`. That cut is measured on a
+quarter of the recent runs that the regrouping was not fitted to. Measured on
+the runs it was fitted to, any regrouping looks like an improvement, and every
+pass would rebuild packs no grouping can actually help.
+
+A reshaped pack's age starts afresh, so it is not reshaped again for another two
+eviction periods. A pack rewritten for eviction keeps its source's age, which
+its manifest records, so cleaning a pack never postpones reshaping it. The job
+summary reports what was evicted, how many packs were old enough to reshape,
+and per job the overfetch and downloads before and after.
 
 | Input | Default | Purpose |
 | --- | --- | --- |
 | `github-token` | required | Needs `actions: write` |
 | `key-prefix` | `bazel-http-v1` | Must match the cache action |
 | `usage-artifact` | `bazel-cache-usage` | Must match the cache action |
-| `max-records` | `25` | How many recent runs to plan from |
+| `max-records` | `25` | How many recent usage records (one per job) to plan from |
 | `min-runs` | `3` | Refuses to plan from a smaller window |
 | `pack-size-mb` | `8` | Target size of a rebuilt pack |
-| `min-waste-fraction` | `0.25` | How wasteful a pack must be to be rebuilt |
+| `min-waste-fraction` | `0.25` | How wasteful a pack must be to be considered |
+| `min-improvement` | `0.25` | How much of its restore cost a reshape must remove |
+| `evict-after-hours` | `168` | Unused entries are evicted after this; reshaping waits twice as long |
+| `download-overhead-mb` | `8` | What one pack download costs, in MiB it is worth |
 | `max-new-mb` | `2048` | Stop once this much has been published |
 | `uploads-per-minute` | `180` | Evenly spaced uploads; must be below 200 |
 | `reap-unmanifested-packs` | `false` | Delete packs no manifest names |
@@ -356,9 +397,11 @@ Three properties are worth knowing before enabling it:
 
 - **Nothing is deleted until its replacement is published.** An interrupted pass
   leaves duplicated storage, never a hole.
-- **No CAS entry is ever dropped.** A manifest records an action's closure as
-  pack IDs rather than digests, so the optimiser cannot prove a blob is
-  unreferenced. It reclaims only packs whose every copy already lost the merge.
+- **Only disuse drops an entry.** A manifest records an action's closure as pack
+  IDs rather than digests, so the optimiser cannot prove a blob is unreferenced.
+  It drops only entries no job has used for `evict-after-hours`, and packs whose
+  every copy already lost the merge. A reader validates an action result's
+  outputs before serving it, so the worst an eviction can do is cause a miss.
 - **A job running during the pass may lose hits, not data.** It resolved the old
   layout and will find packs gone. Scheduling the pass when the repository is
   quiet narrows that window; nothing can close it.
@@ -401,6 +444,12 @@ A dry run applies the age filter and reports how many packs it would take, so
 This is worth enabling when the job summary shows a large "packs no manifest
 names" count, which usually means manifests were evicted while their packs
 survived.
+
+The same option also deletes manifests whose pack is gone, subject to the same
+age threshold. Readers already skip those, and they would expire unread within a
+week, but until then they take quota. Packs get evicted for lack of quota, and
+those evictions are what leave the manifests behind. Failing to delete one of
+these manifests is logged rather than failing the pass.
 
 `min-runs` refuses to plan from too small a window, since a handful of records
 describes those particular jobs rather than the repository. A pass with too few

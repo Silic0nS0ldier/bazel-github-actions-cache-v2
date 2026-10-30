@@ -14,6 +14,11 @@ type Demand struct {
 	downloads map[string]map[string]struct{}
 	presence  map[string]uint64
 	runs      map[string]struct{}
+
+	// Built lazily from the above, and dropped by Observe.
+	order    []string
+	position map[string]int
+	sets     map[string]runSet
 }
 
 func NewDemand() *Demand {
@@ -33,6 +38,7 @@ func (d *Demand) Observe(runID string, report server.UsageReport) {
 	if runID == "" {
 		return
 	}
+	d.order, d.position, d.sets = nil, nil, nil
 	d.runs[runID] = struct{}{}
 	for _, entry := range report.Entries {
 		key := demandKey(entry.Kind, entry.Digest)
@@ -53,6 +59,52 @@ func (d *Demand) Observe(runID string, report server.UsageReport) {
 // a plan built from noise.
 func (d *Demand) Runs() int { return len(d.runs) }
 
+// minHoldoutRuns is the smallest window split into fitting and checking runs;
+// below it every run does both.
+const minHoldoutRuns = 4
+
+// split sets aside every fourth run, so that a regrouping fitted to the rest
+// can be judged on jobs it never saw. Judged on its own runs, any regrouping
+// looks like an improvement, and a pass would chase each window's noise.
+func (d *Demand) split() (fit, check *Demand) {
+	if len(d.runs) < minHoldoutRuns {
+		return d, d
+	}
+	ids := make([]string, 0, len(d.runs))
+	for id := range d.runs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	held := make(map[string]bool, len(ids)/4)
+	for at, id := range ids {
+		if at%4 == 3 {
+			held[id] = true
+		}
+	}
+	return d.filter(func(id string) bool { return !held[id] }), d.filter(func(id string) bool { return held[id] })
+}
+
+func (d *Demand) filter(keep func(string) bool) *Demand {
+	filtered := NewDemand()
+	for id := range d.runs {
+		if keep(id) {
+			filtered.runs[id] = struct{}{}
+		}
+	}
+	for key, runs := range d.downloads {
+		for id := range runs {
+			if !keep(id) {
+				continue
+			}
+			if filtered.downloads[key] == nil {
+				filtered.downloads[key] = make(map[string]struct{})
+			}
+			filtered.downloads[key][id] = struct{}{}
+		}
+	}
+	return filtered
+}
+
 // Downloaded reports whether any observed job needed the entry's bytes. A
 // presence-only entry is answered from the manifest without restoring its pack,
 // so it costs a reader nothing and is not worth separating out.
@@ -60,9 +112,70 @@ func (d *Demand) Downloaded(kind, digest string) bool {
 	return len(d.downloads[demandKey(kind, digest)]) > 0
 }
 
-// runsFor is the set of jobs that downloaded an entry.
-func (d *Demand) runsFor(kind, digest string) map[string]struct{} {
-	return d.downloads[demandKey(kind, digest)]
+// index numbers the runs, busiest first, so that ordering run sets by their
+// lowest bits clusters entries by the jobs that restore the most.
+func (d *Demand) index() {
+	if d.position != nil {
+		return
+	}
+	busy := make(map[string]int, len(d.runs))
+	for _, runs := range d.downloads {
+		for run := range runs {
+			busy[run]++
+		}
+	}
+	d.order = make([]string, 0, len(d.runs))
+	for run := range d.runs {
+		d.order = append(d.order, run)
+	}
+	sort.Slice(d.order, func(i, j int) bool {
+		if busy[d.order[i]] != busy[d.order[j]] {
+			return busy[d.order[i]] > busy[d.order[j]]
+		}
+		return d.order[i] < d.order[j]
+	})
+	d.position = make(map[string]int, len(d.order))
+	for at, run := range d.order {
+		d.position[run] = at
+	}
+	d.sets = make(map[string]runSet)
+}
+
+// Used reports whether any observed job downloaded the entry or checked that it
+// exists. Either keeps it: a presence check is how a job, or a reader validating
+// an action result, depends on an entry it does not need the bytes of.
+func (d *Demand) Used(kind, digest string) bool {
+	key := demandKey(kind, digest)
+	return len(d.downloads[key]) > 0 || d.presence[key] > 0
+}
+
+// runSet is the jobs that downloaded an entry, as a bitset over index order.
+// The result is shared and must not be modified.
+func (d *Demand) runSet(kind, digest string) runSet {
+	d.index()
+	key := demandKey(kind, digest)
+	if set, found := d.sets[key]; found {
+		return set
+	}
+	set := newRunSet(len(d.order))
+	for run := range d.downloads[key] {
+		set.add(d.position[run])
+	}
+	d.sets[key] = set
+	return set
+}
+
+// names lists the runs in a set, sorted, in the form Signature uses.
+func (d *Demand) names(set runSet) string {
+	d.index()
+	ids := make([]string, 0, set.count())
+	for at, run := range d.order {
+		if set.has(at) {
+			ids = append(ids, run)
+		}
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, " ")
 }
 
 // Signature names the set of runs that downloaded an entry, and is empty when

@@ -28,15 +28,19 @@ func run() error {
 		cacheDir         = flag.String("cache-dir", "", "local spool directory")
 		keyPrefix        = flag.String("key-prefix", "bazel-http-v1", "GitHub cache key prefix")
 		usageArtifact    = flag.String("usage-artifact", "bazel-cache-usage", "job artifact holding the usage records")
-		maxRecords       = flag.Int("max-records", 25, "how many recent runs to plan from")
+		maxRecords       = flag.Int("max-records", 25, "how many recent usage records, one per job, to plan from")
 		packSize         = flag.Int64("pack-size", 8*1024*1024, "target size of a rebuilt pack, in object bytes")
 		minWasteFraction = flag.Float64("min-waste-fraction", 0.25, "how much of a pack must be bytes a restore does not want before rebuilding it")
+		minImprovement   = flag.Float64("min-improvement", 0.25, "how much of a pack's overfetch a rebuild must remove, judged on runs the regrouping was not fitted to")
 		minRuns          = flag.Int("min-runs", 3, "refuse to plan from fewer usage records than this")
 		maxBlobSize      = flag.Int64("max-blob-size", 512*1024*1024, "maximum object size in bytes")
 		uploadsPerMinute = flag.Int("uploads-per-minute", 180, "maximum GitHub cache uploads per minute; must be below 200")
+		concurrency      = flag.Int("concurrency", 4, "how many packs to rebuild at once")
 		maxNewBytes      = flag.Int64("max-new-bytes", 2*1024*1024*1024, "stop a pass once it has published this many bytes; zero means no limit")
 		reap             = flag.Bool("reap", false, "delete packs that no manifest names at all")
 		reapOlderThan    = flag.Duration("reap-older-than", 24*time.Hour, "only reap packs older than this")
+		evictAfter       = flag.Duration("evict-after", 7*24*time.Hour, "evict entries nothing has used for this long; only packs twice as old are reshaped")
+		downloadOverhead = flag.Int64("download-overhead", 8*1024*1024, "fixed cost of restoring one pack, in bytes it is worth")
 		scope            = flag.String("ref", os.Getenv("GITHUB_REF"), "full Git reference whose caches this pass reads and replaces")
 		timeout          = flag.Duration("backend-timeout", 5*time.Minute, "timeout per backend operation")
 		dryRun           = flag.Bool("dry-run", false, "plan and report without publishing or deleting")
@@ -50,6 +54,12 @@ func run() error {
 	}
 
 	logger := log.New(os.Stderr, "cache-optimiser: ", log.LstdFlags|log.LUTC)
+	if *evictAfter <= 0 {
+		return fmt.Errorf("--evict-after must be positive")
+	}
+	if *downloadOverhead < 0 {
+		return fmt.Errorf("--download-overhead must not be negative")
+	}
 	if *scope == "" {
 		return fmt.Errorf("--ref is required; it is what keeps this pass inside one cache scope")
 	}
@@ -82,15 +92,19 @@ func run() error {
 		MaxRecords:       *maxRecords,
 		MaxBlobSize:      *maxBlobSize,
 		UploadsPerMinute: *uploadsPerMinute,
+		Concurrency:      *concurrency,
 		MaxNewBytes:      *maxNewBytes,
 		Reap:             *reap,
 		ReapOlderThan:    *reapOlderThan,
+		EvictAfter:       *evictAfter,
 		Lister:           catalog,
 		Timeout:          *timeout,
 		DryRun:           *dryRun,
 		Plan: optimiser.Options{
 			TargetPackSize:   *packSize,
 			MinWasteFraction: *minWasteFraction,
+			MinImprovement:   *minImprovement,
+			DownloadOverhead: *downloadOverhead,
 			MinRuns:          *minRuns,
 		},
 		Log: logger.Printf,

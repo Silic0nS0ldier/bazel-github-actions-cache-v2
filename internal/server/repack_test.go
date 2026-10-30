@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -150,7 +152,7 @@ func TestRepackerRepublishesEntriesReadably(t *testing.T) {
 	}
 	defer repacker.Close()
 
-	pack, manifestID, err := repacker.Publish(context.Background(), layout.Entries)
+	pack, manifestID, err := repacker.Publish(context.Background(), layout.Entries, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +205,7 @@ func TestRepackerSplitsEntriesAcrossPacks(t *testing.T) {
 	placement := make(map[string]string)
 	keep := make(map[string]struct{})
 	for _, entry := range layout.Entries {
-		pack, _, err := repacker.Publish(context.Background(), []LayoutEntry{entry})
+		pack, _, err := repacker.Publish(context.Background(), []LayoutEntry{entry}, time.Time{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -247,7 +249,7 @@ func TestRepackerCreatesItsSpoolDirectory(t *testing.T) {
 	}
 	defer repacker.Close()
 
-	if _, _, err := repacker.Publish(context.Background(), layout.Entries); err != nil {
+	if _, _, err := repacker.Publish(context.Background(), layout.Entries, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -273,7 +275,140 @@ func TestRepackerRejectsAMissingSourcePack(t *testing.T) {
 	}
 	defer repacker.Close()
 
-	if _, _, err := repacker.Publish(context.Background(), layout.Entries); err == nil {
+	if _, _, err := repacker.Publish(context.Background(), layout.Entries, time.Time{}); err == nil {
 		t.Fatal("published from a pack that is gone")
+	}
+}
+
+// Concurrent publications that copy out of the same source pack must share one
+// download of it, and all stay readable.
+func TestRepackerPublishesConcurrentlyFromSharedSources(t *testing.T) {
+	backend := newMemoryBackend()
+	blobs := make([][]byte, 0, 8)
+	for index := range 8 {
+		blobs = append(blobs, []byte("shared source output "+strconv.Itoa(index)))
+	}
+	seedPacked(t, backend, blobs...)
+	layout := readLayout(t, backend)
+	if len(layout.Packs) != 1 {
+		t.Fatalf("seeded %d packs, want one shared source", len(layout.Packs))
+	}
+
+	repacker, err := NewRepacker(RepackOptions{
+		Backend:     backend,
+		CacheDir:    t.TempDir(),
+		KeyPrefix:   "test-v1",
+		MaxBlobSize: 1 << 20,
+		Timeout:     5 * time.Second,
+		Parents:     layout.Heads,
+		Packs:       layout.Packs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repacker.Close()
+
+	backend.mu.Lock()
+	loadsBefore := backend.loads
+	backend.mu.Unlock()
+	keep := make(map[string]struct{})
+	var mu sync.Mutex
+	var wait sync.WaitGroup
+	errs := make(chan error, len(layout.Entries))
+	for _, entry := range layout.Entries {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			pack, _, err := repacker.Publish(context.Background(), []LayoutEntry{entry}, time.Time{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			mu.Lock()
+			keep[pack.Key] = struct{}{}
+			mu.Unlock()
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	loads := backend.loads - loadsBefore
+	backend.mu.Unlock()
+	if loads != 1 {
+		t.Fatalf("the shared source was downloaded %d times", loads)
+	}
+	repacker.Release(layout.Packs[0].ID)
+	dropOriginals(t, backend, layout, keep)
+
+	reader := testPackedServer(t, backend)
+	defer closePackedServer(t, reader)
+	for _, blob := range blobs {
+		if response := readCacheObject(reader, "/cas/"+digest(blob)); response.Code != http.StatusOK {
+			t.Fatalf("reading %s = %d", digest(blob), response.Code)
+		}
+	}
+}
+
+// Reaping needs the manifests whose pack is gone by key, not just a count.
+func TestReadLayoutListsManifestsWhosePackIsGone(t *testing.T) {
+	backend := newMemoryBackend()
+	seedPacked(t, backend, []byte("evicted output"))
+	seedPacked(t, backend, []byte("surviving output"))
+	before := readLayout(t, backend)
+	if len(before.Packs) != 2 {
+		t.Fatalf("seeded %d packs, want 2", len(before.Packs))
+	}
+	evicted := before.Packs[0]
+	backend.remove(evicted.Key)
+
+	after := readLayout(t, backend)
+	if after.OrphanManifests != 1 || len(after.PacklessManifests) != 1 {
+		t.Fatalf("orphaned %d, listed %+v", after.OrphanManifests, after.PacklessManifests)
+	}
+	if got := after.PacklessManifests[0]; got.Pack != evicted.ID ||
+		!strings.HasPrefix(got.Key, ManifestKeyPrefix("test-v1")) {
+		t.Fatalf("listed %+v, want the manifest of %s", got, evicted.ID)
+	}
+}
+
+// Dropping stale entries must not make a pack look newly shaped, or the
+// age-gated reshaping would never reach it. The age travels in the manifest.
+func TestRepackerCarriesAPackAgeThroughItsManifest(t *testing.T) {
+	backend := newMemoryBackend()
+	seedPacked(t, backend, []byte("aged output"))
+	layout := readLayout(t, backend)
+	if !layout.Packs[0].Since.IsZero() {
+		t.Fatalf("a server-written pack recorded since %v", layout.Packs[0].Since)
+	}
+
+	repacker, err := NewRepacker(RepackOptions{
+		Backend:     backend,
+		CacheDir:    t.TempDir(),
+		KeyPrefix:   "test-v1",
+		MaxBlobSize: 1 << 20,
+		Timeout:     5 * time.Second,
+		Parents:     layout.Heads,
+		Packs:       layout.Packs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repacker.Close()
+	since := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	if _, _, err := repacker.Publish(context.Background(), layout.Entries, since); err != nil {
+		t.Fatal(err)
+	}
+	// The rebuild of a one-entry pack reproduces its bytes, so only the old
+	// manifest goes.
+	for _, reference := range layout.Manifests {
+		backend.remove(reference.Key)
+	}
+
+	after := readLayout(t, backend)
+	if len(after.Packs) != 1 || !after.Packs[0].Since.Equal(since) {
+		t.Fatalf("packs = %+v, want one shaped at %v", after.Packs, since)
 	}
 }

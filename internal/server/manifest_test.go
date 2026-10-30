@@ -105,3 +105,34 @@ func TestManifestWithManyEntriesDecodes(t *testing.T) {
 		t.Fatalf("decoded %d CAS entries, want %d", len(decoded.CAS), len(value.CAS))
 	}
 }
+
+// A pack's age is optional: manifests without it still decode, and one that
+// records it survives a round trip unchanged.
+func TestManifestCarriesAnOptionalPackAge(t *testing.T) {
+	packID := digest([]byte("pack"))
+	for _, since := range []int64{0, 1_790_000_000} {
+		value := manifest{
+			Version: manifestFormatVersion,
+			Parents: []string{},
+			Packs:   []packDescriptor{{ID: packID, Key: packKeyFor("test", packID), Size: 1, Since: since}},
+		}
+		encoded, manifestCID, err := encodeManifest(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := decodeManifest(encoded, manifestCID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Packs[0].Since != since {
+			t.Fatalf("since = %d, want %d", decoded.Packs[0].Since, since)
+		}
+		reencoded, _, err := encodeManifest(decoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(encoded, reencoded) {
+			t.Fatal("a manifest with a pack age is not deterministic")
+		}
+	}
+}

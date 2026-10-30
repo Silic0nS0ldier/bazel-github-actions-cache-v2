@@ -18,7 +18,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.writeFileSync(process.env.STUB_ARGS_FILE, JSON.stringify(args));
 const at = args.indexOf("--summary-file");
-fs.writeFileSync(args[at + 1], JSON.stringify({ Records: 4, Rebuilt: 0, Deleted: 0, DryRun: true, Entries: 169396, WastedBytes: 1610612736 }));
+fs.writeFileSync(args[at + 1], JSON.stringify({ Records: 4, Rebuilt: 0, Deleted: 0, DryRun: true, Entries: 169396, WastedBytes: 1610612736, OverfetchBefore: 1073741824, OverfetchAfter: 268435456, Unimproved: 12, DownloadsBefore: 7.25, DownloadsAfter: 3, Evicted: 3, EvictedEntries: 1500, EvictedBytes: 52428800, ReshapeSkipped: "1 packs are old enough to reshape, and reshaping needs at least 2" }));
 `;
 
 function runWrapper(t, inputs) {
@@ -74,6 +74,9 @@ test("the wrapper runs the binary for this architecture with the parsed inputs",
     "INPUT_USAGE-ARTIFACT": "custom-usage",
     "INPUT_MIN-RUNS": "2",
     "INPUT_PACK-SIZE-MB": "4",
+    "INPUT_MIN-IMPROVEMENT": "0.4",
+    "INPUT_EVICT-AFTER-HOURS": "72",
+    "INPUT_DOWNLOAD-OVERHEAD-MB": "2",
     "INPUT_DRY-RUN": "true",
   });
   if (!run) return;
@@ -85,6 +88,9 @@ test("the wrapper runs the binary for this architecture with the parsed inputs",
   assert.equal(valueOf("--usage-artifact"), "custom-usage");
   assert.equal(valueOf("--min-runs"), "2");
   assert.equal(valueOf("--pack-size"), String(4 * 1024 * 1024));
+  assert.equal(valueOf("--min-improvement"), "0.4");
+  assert.equal(valueOf("--evict-after"), "72h");
+  assert.equal(valueOf("--download-overhead"), String(2 * 1024 * 1024));
   assert.ok(args.includes("--dry-run"));
 });
 
@@ -178,6 +184,12 @@ test("the result reaches the job summary and the step outputs", (t) => {
   // Sizes are for people to read, so they use the largest unit that fits
   // rather than a raw byte count.
   assert.match(summary, /Wasted per restore \| 1\.5GiB/);
+  assert.match(summary, /Overfetch per job before \| 1GiB/);
+  assert.match(summary, /Overfetch per job after \| 256MiB/);
+  assert.match(summary, /Wasteful packs no regrouping improves \| 12/);
+  assert.match(summary, /Downloads per job before \| 7\.3/);
+  assert.match(summary, /Stale entries evicted \| 1,500 \(50MiB\)/);
+  assert.match(summary, /Not reshaping: 1 packs are old enough/);
   assert.match(summary, /Live entries \| 169,396/);
   assert.match(summary, /Dry run \| yes/);
   const outputs = fs.readFileSync(path.join(run.runnerTemp, "output"), "utf8");
@@ -200,6 +212,14 @@ test("an input outside its range stops the pass", (t) => {
 
   assert.equal(run.result.status, 1);
   assert.match(run.result.stdout, /min-waste-fraction must be between 0 and 1/);
+
+  const improvement = runWrapper(t, { "INPUT_MIN-IMPROVEMENT": "-0.1" });
+  assert.equal(improvement.result.status, 1);
+  assert.match(improvement.result.stdout, /min-improvement must be between 0 and 1/);
+
+  const eviction = runWrapper(t, { "INPUT_EVICT-AFTER-HOURS": "0" });
+  assert.equal(eviction.result.status, 1);
+  assert.match(eviction.result.stdout, /evict-after-hours must be an integer between 1 and 8760/);
 });
 
 // Deleting spans every ref, but a replacement published from a branch is only

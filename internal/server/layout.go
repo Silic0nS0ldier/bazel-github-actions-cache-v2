@@ -18,6 +18,9 @@ type LayoutPack struct {
 	StoredSize    int64
 	DeclaredBytes int64
 	DeclaredCount int
+	// Since is when the pack's contents took their current shape, if its
+	// manifest records it. Otherwise the cache entry's creation time stands in.
+	Since time.Time
 }
 
 // LayoutEntry is the copy of a digest a reader would actually be served.
@@ -59,8 +62,11 @@ type Layout struct {
 	// at all. A pack whose manifest merely failed to load is excluded, because
 	// another ref may still be reading it.
 	UnmanifestedPacks []LayoutPack
-	// OrphanManifests are manifests whose pack is gone. They self-expire.
-	OrphanManifests int
+	// OrphanManifests counts manifests whose pack is gone, which
+	// PacklessManifests lists. Readers leave them unread so they expire, and a
+	// reaping pass can remove them sooner.
+	OrphanManifests   int
+	PacklessManifests []LayoutManifest
 	// UnreadableManifests were listed but could not be restored, because they
 	// belong to another ref's cache scope or were evicted. A plan then rests on
 	// the part of the layout this job can actually see.
@@ -79,6 +85,11 @@ type LayoutOptions struct {
 // ManifestKey names the cache entry a manifest is committed under.
 func ManifestKey(prefix, packID, manifestID string) string {
 	return manifestKeyFor(prefix, packID, manifestID)
+}
+
+// ManifestKeyPrefix is the key namespace every manifest is stored under.
+func ManifestKeyPrefix(prefix string) string {
+	return manifestKeyPrefix(prefix)
 }
 
 // PackKeyPrefix is the key namespace every pack is stored under.
@@ -129,6 +140,8 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 		manifested[packID] = struct{}{}
 		if _, listed := listedPacks[packID]; !listed {
 			layout.OrphanManifests++
+			layout.PacklessManifests = append(layout.PacklessManifests,
+				LayoutManifest{ID: manifestID, Key: key, Pack: packID})
 			continue
 		}
 		value, err := loadManifestFrom(ctx, options, key, manifestID)
@@ -209,6 +222,9 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 	sort.Slice(layout.UnmanifestedPacks, func(i, j int) bool {
 		return layout.UnmanifestedPacks[i].ID < layout.UnmanifestedPacks[j].ID
 	})
+	sort.Slice(layout.PacklessManifests, func(i, j int) bool {
+		return layout.PacklessManifests[i].Key < layout.PacklessManifests[j].Key
+	})
 
 	for _, id := range ids {
 		layout.Manifests = append(layout.Manifests, references[id])
@@ -217,13 +233,17 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 		}
 	}
 	for _, descriptor := range packs {
-		layout.Packs = append(layout.Packs, LayoutPack{
+		pack := LayoutPack{
 			ID:            descriptor.ID,
 			Key:           descriptor.Key,
 			StoredSize:    descriptor.Size,
 			DeclaredBytes: declaredBytes[descriptor.ID],
 			DeclaredCount: declaredCount[descriptor.ID],
-		})
+		}
+		if descriptor.Since > 0 {
+			pack.Since = time.Unix(descriptor.Since, 0).UTC()
+		}
+		layout.Packs = append(layout.Packs, pack)
 	}
 	sort.Slice(layout.Packs, func(i, j int) bool { return layout.Packs[i].ID < layout.Packs[j].ID })
 

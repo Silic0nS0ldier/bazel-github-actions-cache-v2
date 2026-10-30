@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,9 +70,10 @@ type artifactListResponse struct {
 }
 
 type artifactSummary struct {
-	ID          int64 `json:"id"`
-	Expired     bool  `json:"expired"`
-	SizeInBytes int64 `json:"size_in_bytes"`
+	ID          int64     `json:"id"`
+	Expired     bool      `json:"expired"`
+	SizeInBytes int64     `json:"size_in_bytes"`
+	CreatedAt   time.Time `json:"created_at"`
 	WorkflowRun struct {
 		ID               int64 `json:"id"`
 		RepositoryID     int64 `json:"repository_id"`
@@ -79,33 +81,153 @@ type artifactSummary struct {
 	} `json:"workflow_run"`
 }
 
+const (
+	artifactsPerPage = 100
+	// maxArtifactPages bounds how far back a listing pages. A repository busy
+	// enough to exceed it within the eviction window gets no eviction rather
+	// than an unbounded pass.
+	maxArtifactPages = 50
+)
+
+// Window asks for every record since a point in time, on top of the newest
+// ones a plan is built from.
+type Window struct {
+	Since  time.Time
+	Recent *Demand
+}
+
+// Coverage says whether Recent holds every record since the window opened.
+// Only then does "no record used this entry" mean nothing used it.
+type Coverage struct {
+	Records  int
+	Complete bool
+	Gap      string
+}
+
 // Collect folds the newest records into demand and reports how many it read.
 // A record that cannot be read is skipped rather than fatal: the plan simply
 // rests on a smaller window.
 func (s *RecordSource) Collect(ctx context.Context, demand *Demand, limit int, warn func(string, ...any)) (int, error) {
-	summaries, err := s.list(ctx, limit)
+	collected, _, err := s.CollectWindow(ctx, demand, limit, Window{}, warn)
+	return collected, err
+}
+
+// CollectWindow is Collect, and also folds every record created since
+// window.Since into window.Recent.
+func (s *RecordSource) CollectWindow(ctx context.Context, demand *Demand, limit int, window Window, warn func(string, ...any)) (int, Coverage, error) {
+	summaries, reached, err := s.list(ctx, limit, window.Since)
 	if err != nil {
-		return 0, err
+		return 0, Coverage{}, err
+	}
+	coverage := Coverage{}
+	gap := func(reason string) {
+		if coverage.Gap == "" {
+			coverage.Gap = reason
+		}
+	}
+	if !window.Since.IsZero() && !reached {
+		gap(fmt.Sprintf("the usage records listed do not reach back to %s", window.Since.Format(time.RFC3339)))
 	}
 	collected := 0
 	for _, summary := range summaries {
-		report, err := s.download(ctx, summary)
-		if err != nil {
-			warn("skipping usage record from run %d: %v", summary.WorkflowRun.ID, err)
+		run := summary.WorkflowRun.ID
+		inWindow := !window.Since.IsZero() && !summary.CreatedAt.Before(window.Since)
+		if !window.Since.IsZero() && summary.CreatedAt.IsZero() {
+			gap(fmt.Sprintf("the record from run %d has no creation time", run))
+		}
+		if summary.Expired || summary.SizeInBytes > maxRecordBytes {
+			if inWindow {
+				gap(fmt.Sprintf("the record from run %d has expired or is too large", run))
+			}
 			continue
 		}
-		demand.Observe(strconv.FormatInt(summary.WorkflowRun.ID, 10), report)
-		collected++
+		forPlan := collected < limit
+		if !forPlan && !inWindow {
+			continue
+		}
+		report, err := s.download(ctx, summary)
+		if err != nil {
+			warn("skipping usage record from run %d: %v", run, err)
+			if inWindow {
+				gap(fmt.Sprintf("the record from run %d could not be read", run))
+			}
+			continue
+		}
+		// Every job publishes its own record, often under the same name as the
+		// other jobs of its run, and each job restores packs for itself.
+		id := recordID(summary)
+		if forPlan {
+			demand.Observe(id, report)
+			collected++
+		}
+		if inWindow && window.Recent != nil {
+			window.Recent.Observe(id, report)
+			coverage.Records++
+		}
 	}
-	return collected, nil
+	coverage.Complete = !window.Since.IsZero() && coverage.Gap == ""
+	return collected, coverage, nil
 }
 
-func (s *RecordSource) list(ctx context.Context, limit int) ([]artifactSummary, error) {
+// list returns the records worth reading, newest first: at least limit usable
+// ones, and everything since since. It reports whether the listing reached a
+// record older than since, which is the only proof nothing in between is
+// missing. Running out of records proves nothing, since retention may have
+// deleted older ones.
+func (s *RecordSource) list(ctx context.Context, limit int, since time.Time) ([]artifactSummary, bool, error) {
+	selected := make([]artifactSummary, 0, limit)
+	seen := make(map[int64]struct{})
+	usable := 0
+	reached := false
+	for page := 1; page <= maxArtifactPages; page++ {
+		listed, err := s.listPage(ctx, page)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, summary := range listed {
+			if !since.IsZero() && !summary.CreatedAt.IsZero() && summary.CreatedAt.Before(since) {
+				reached = true
+			}
+			// A run started from a fork is outside this repository's trust
+			// boundary and could otherwise steer the layout by publishing a
+			// shaped record.
+			if summary.WorkflowRun.HeadRepositoryID != summary.WorkflowRun.RepositoryID {
+				continue
+			}
+			// Pages can shift while being read, so the same record may be listed
+			// twice; it must not count twice. Records of other jobs in the same
+			// run are not duplicates: dropping them would hide what those jobs
+			// used, and eviction would take it.
+			if _, duplicate := seen[summary.ID]; duplicate {
+				continue
+			}
+			seen[summary.ID] = struct{}{}
+			selected = append(selected, summary)
+			if !summary.Expired && summary.SizeInBytes <= maxRecordBytes {
+				usable++
+			}
+		}
+		if len(listed) < artifactsPerPage || usable >= limit && (since.IsZero() || reached) {
+			break
+		}
+	}
+	sort.SliceStable(selected, func(i, j int) bool { return selected[i].CreatedAt.After(selected[j].CreatedAt) })
+	return selected, reached, nil
+}
+
+// recordID names the job a record came from: its run, and the artifact the
+// job published.
+func recordID(summary artifactSummary) string {
+	return strconv.FormatInt(summary.WorkflowRun.ID, 10) + "/" + strconv.FormatInt(summary.ID, 10)
+}
+
+func (s *RecordSource) listPage(ctx context.Context, page int) ([]artifactSummary, error) {
 	endpoint := *s.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/repos/" + s.repository + "/actions/artifacts"
 	query := endpoint.Query()
 	query.Set("name", s.artifact)
-	query.Set("per_page", "100")
+	query.Set("per_page", strconv.Itoa(artifactsPerPage))
+	query.Set("page", strconv.Itoa(page))
 	endpoint.RawQuery = query.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
@@ -125,29 +247,7 @@ func (s *RecordSource) list(ctx context.Context, limit int) ([]artifactSummary, 
 	if err := json.NewDecoder(response.Body).Decode(&listed); err != nil {
 		return nil, fmt.Errorf("decode usage artifact list: %w", err)
 	}
-
-	// The listing is newest first, so truncating keeps the most recent window.
-	selected := make([]artifactSummary, 0, limit)
-	seen := make(map[int64]struct{})
-	for _, summary := range listed.Artifacts {
-		if summary.Expired || summary.SizeInBytes > maxRecordBytes {
-			continue
-		}
-		// A run started from a fork is outside this repository's trust boundary
-		// and could otherwise steer the layout by publishing a shaped record.
-		if summary.WorkflowRun.HeadRepositoryID != summary.WorkflowRun.RepositoryID {
-			continue
-		}
-		if _, duplicate := seen[summary.WorkflowRun.ID]; duplicate {
-			continue
-		}
-		seen[summary.WorkflowRun.ID] = struct{}{}
-		selected = append(selected, summary)
-		if len(selected) == limit {
-			break
-		}
-	}
-	return selected, nil
+	return listed.Artifacts, nil
 }
 
 func (s *RecordSource) download(ctx context.Context, summary artifactSummary) (server.UsageReport, error) {

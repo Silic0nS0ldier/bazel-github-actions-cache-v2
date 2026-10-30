@@ -145,3 +145,71 @@ func TestReapRefusesWithoutAnAgeThreshold(t *testing.T) {
 		t.Fatal("reaped without an age threshold")
 	}
 }
+
+// A manifest whose pack is gone is skipped by every reader, so once it is old
+// enough that no listing race can explain it, it is only taking quota.
+func TestReapManifestsRemovesOldManifestsWhosePackIsGone(t *testing.T) {
+	pruner := &recordingPruner{}
+	layout := server.Layout{PacklessManifests: []server.LayoutManifest{
+		{ID: "old", Key: "prefix-car-manifest-v2-gone-old", Pack: "gone"},
+		{ID: "fresh", Key: "prefix-car-manifest-v2-new-fresh", Pack: "new"},
+	}}
+	options := reapOptions(pruner, []cache.CatalogEntry{
+		{Key: "prefix-car-manifest-v2-gone-old", CreatedAt: time.Now().Add(-72 * time.Hour)},
+		{Key: "prefix-car-manifest-v2-new-fresh", CreatedAt: time.Now().Add(-time.Minute)},
+	})
+
+	reapable, reaped, err := reapManifests(context.Background(), options, layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reapable != 1 || reaped != 1 || len(pruner.deleted) != 1 || pruner.deleted[0] != "prefix-car-manifest-v2-gone-old" {
+		t.Fatalf("reapable %d, reaped %d, deleted %v", reapable, reaped, pruner.deleted)
+	}
+}
+
+func TestReapManifestsDeletesNothingOnADryRun(t *testing.T) {
+	pruner := &recordingPruner{}
+	layout := server.Layout{PacklessManifests: []server.LayoutManifest{
+		{ID: "old", Key: "prefix-car-manifest-v2-gone-old", Pack: "gone"},
+	}}
+	options := reapOptions(pruner, []cache.CatalogEntry{
+		{Key: "prefix-car-manifest-v2-gone-old", CreatedAt: time.Now().Add(-72 * time.Hour)},
+	})
+	options.DryRun = true
+
+	reapable, reaped, err := reapManifests(context.Background(), options, layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reapable != 1 || reaped != 0 || len(pruner.deleted) != 0 {
+		t.Fatalf("reapable %d, reaped %d, deleted %v", reapable, reaped, pruner.deleted)
+	}
+}
+
+// A pack rewritten only to evict stale entries records its age in its manifest,
+// which must win over its own, newer, creation time.
+func TestPackAgesPreferWhatTheManifestRecords(t *testing.T) {
+	recorded := time.Now().Add(-30 * 24 * time.Hour).UTC().Truncate(time.Second)
+	created := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	layout := server.Layout{Packs: []server.LayoutPack{
+		{ID: "evicted", Key: "prefix-car-pack-v1-evicted", Since: recorded},
+		{ID: "written", Key: "prefix-car-pack-v1-written"},
+		{ID: "unlisted", Key: "prefix-car-pack-v1-unlisted"},
+	}}
+	options := reapOptions(&recordingPruner{}, []cache.CatalogEntry{
+		{Key: "prefix-car-pack-v1-evicted", CreatedAt: created},
+		{Key: "prefix-car-pack-v1-written", CreatedAt: created},
+	})
+
+	ages, err := packAges(context.Background(), options, layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ages["evicted"].Equal(recorded) || !ages["written"].Equal(created) {
+		t.Fatalf("ages = %v", ages)
+	}
+	if _, known := ages["unlisted"]; known {
+		t.Fatal("a pack with no known age was given one")
+	}
+}
