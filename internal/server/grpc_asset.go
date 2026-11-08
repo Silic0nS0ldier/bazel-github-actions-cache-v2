@@ -261,14 +261,22 @@ func (s *Server) fetchAssetFrom(
 	if err != nil {
 		return digestReference{}, err
 	}
-	defer os.Remove(path)
+	keep := false
+	defer func() {
+		if !keep {
+			_ = os.Remove(path)
+		}
+	}()
 
 	file, err := os.Open(path)
 	if err != nil {
 		return digestReference{}, fmt.Errorf("reopen fetched asset: %w", err)
 	}
 	defer file.Close()
-	if err := s.writeObject(ctx, "cas", reference.hash, file, reference.size); err != nil {
+	s.stats.operations.Add(1)
+	s.stats.bytesReceived.Add(uint64(reference.size))
+	keep, err = s.storeObjectFile(ctx, "cas", reference.hash, file, path, reference.size)
+	if err != nil {
 		return digestReference{}, fmt.Errorf("publish fetched asset: %w", err)
 	}
 	if checksum.algorithm != sha256Algorithm {
