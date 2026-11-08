@@ -3,8 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -79,6 +81,21 @@ func closePackedServer(t *testing.T, server *Server) {
 	}
 }
 
+func cacheFilesWithPrefix(t *testing.T, dir, prefix string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			paths = append(paths, entry.Name())
+		}
+	}
+	return paths
+}
+
 func TestPackedStoreRoundTripCommitsPackBeforeManifest(t *testing.T) {
 	backend := newMemoryBackend()
 	seed := testPackedServer(t, backend)
@@ -110,6 +127,94 @@ func TestPackedStoreRoundTripCommitsPackBeforeManifest(t *testing.T) {
 	if stats.PackDownloads != 1 || stats.Hits != 2 || stats.ValidatedActionResults != 1 {
 		t.Fatalf("unexpected restore stats: %+v", stats)
 	}
+}
+
+func TestPackedStoreFlushReplacesUploadSpoolsWithLocalPack(t *testing.T) {
+	server := testPackedServer(t, newMemoryBackend())
+	payload := []byte("keep only the committed pack")
+	digest := digest(payload)
+	if response := putCacheObject(server, "/cas/"+digest, payload); response.Code != http.StatusNoContent {
+		t.Fatalf("CAS PUT = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := len(cacheFilesWithPrefix(t, server.cfg.CacheDir, "upload-")); got != 1 {
+		t.Fatalf("upload spools before flush = %d, want 1", got)
+	}
+
+	if err := server.packs.flush(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := cacheFilesWithPrefix(t, server.cfg.CacheDir, "upload-"); len(got) != 0 {
+		t.Fatalf("flush left upload spools: %v", got)
+	}
+	if got := cacheFilesWithPrefix(t, server.cfg.CacheDir, "manifest-"); len(got) != 0 {
+		t.Fatalf("flush left manifest spools: %v", got)
+	}
+	if got := len(cacheFilesWithPrefix(t, server.cfg.CacheDir, "pack-")); got != 1 {
+		t.Fatalf("local packs after flush = %d, want 1", got)
+	}
+	if response := readCacheObject(server, "/cas/"+digest); response.Code != http.StatusOK || response.Body.String() != string(payload) {
+		t.Fatalf("CAS GET after flush = %d, body = %q", response.Code, response.Body.String())
+	}
+	if stats := server.Snapshot(); stats.PackDownloads != 0 {
+		t.Fatalf("newly flushed pack was downloaded again: %+v", stats)
+	}
+	if response := putCacheObject(server, "/cas/"+digest, payload); response.Code != http.StatusNoContent {
+		t.Fatalf("duplicate CAS PUT = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := cacheFilesWithPrefix(t, server.cfg.CacheDir, "upload-"); len(got) != 0 {
+		t.Fatalf("duplicate of a committed CAS left upload spools: %v", got)
+	}
+
+	closePackedServer(t, server)
+	if got := cacheFilesWithPrefix(t, server.cfg.CacheDir, "pack-"); len(got) != 0 {
+		t.Fatalf("close left local pack files: %v", got)
+	}
+}
+
+func TestPackedStoreFailedDownloadRemovesSpool(t *testing.T) {
+	server := testPackedServer(t, newMemoryBackend())
+	defer closePackedServer(t, server)
+
+	_, err := server.packs.downloadPack(context.Background(), packDescriptor{
+		ID:  strings.Repeat("0", 64),
+		Key: "missing-pack",
+	})
+	if err == nil {
+		t.Fatal("download of a missing pack succeeded")
+	}
+	if got := cacheFilesWithPrefix(t, server.cfg.CacheDir, "pack-download-"); len(got) != 0 {
+		t.Fatalf("failed download left spool files: %v", got)
+	}
+}
+
+func TestPackedStoreFailedFlushRemovesTemporaryPack(t *testing.T) {
+	backend := newMemoryBackend()
+	server := testPackedServer(t, backend)
+	payload := []byte("retry after a backend failure")
+	if response := putCacheObject(server, "/cas/"+digest(payload), payload); response.Code != http.StatusNoContent {
+		t.Fatalf("CAS PUT = %d, body = %s", response.Code, response.Body.String())
+	}
+	backend.mu.Lock()
+	backend.saveErr = errors.New("backend unavailable")
+	backend.mu.Unlock()
+
+	if err := server.packs.flush(context.Background(), true); err == nil {
+		t.Fatal("flush succeeded while the backend was unavailable")
+	}
+	if got := cacheFilesWithPrefix(t, server.cfg.CacheDir, "pack-"); len(got) != 0 {
+		t.Fatalf("failed flush left pack files: %v", got)
+	}
+	if got := cacheFilesWithPrefix(t, server.cfg.CacheDir, "manifest-"); len(got) != 0 {
+		t.Fatalf("failed flush left manifest files: %v", got)
+	}
+	if got := len(cacheFilesWithPrefix(t, server.cfg.CacheDir, "upload-")); got != 1 {
+		t.Fatalf("failed flush discarded pending upload spools: got %d, want 1", got)
+	}
+
+	backend.mu.Lock()
+	backend.saveErr = nil
+	backend.mu.Unlock()
+	closePackedServer(t, server)
 }
 
 func TestPackedStoreRestoresCASLargerThanCARDefaultSectionLimit(t *testing.T) {

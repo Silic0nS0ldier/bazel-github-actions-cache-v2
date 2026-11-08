@@ -46,6 +46,12 @@ func (s *Server) degrade(failure error) error {
 // readObject resolves an object and, for action results, validates that its CAS
 // closure is still complete.
 func (s *Server) readObject(ctx context.Context, kind, digest string) (object, error) {
+	s.objectFilesMu.RLock()
+	defer s.objectFilesMu.RUnlock()
+	return s.readObjectWithObjectFilesLock(ctx, kind, digest)
+}
+
+func (s *Server) readObjectWithObjectFilesLock(ctx context.Context, kind, digest string) (object, error) {
 	s.stats.operations.Add(1)
 	obj, found, err := s.resolve(ctx, s.objectKey(kind, digest), kind, digest)
 	if err != nil {
@@ -72,7 +78,9 @@ func (s *Server) readObject(ctx context.Context, kind, digest string) (object, e
 // openObject resolves an object and opens it for serving. The caller closes the
 // returned file. A successful call counts a cache hit.
 func (s *Server) openObject(ctx context.Context, kind, digest string) (*os.File, int64, error) {
-	obj, err := s.readObject(ctx, kind, digest)
+	s.objectFilesMu.RLock()
+	defer s.objectFilesMu.RUnlock()
+	obj, err := s.readObjectWithObjectFilesLock(ctx, kind, digest)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -209,6 +217,10 @@ func (s *Server) writeObject(
 		return errLocalFailure
 	}
 
+	packed := s.packs != nil
+	if packed {
+		s.objectFilesMu.RLock()
+	}
 	key := s.objectKey(kind, digest)
 	s.objectsMu.Lock()
 	stored, exists := s.objects[key]
@@ -220,11 +232,22 @@ func (s *Server) writeObject(
 	s.objectsMu.Unlock()
 
 	if !s.cfg.WriteEnabled {
+		if packed {
+			s.objectFilesMu.RUnlock()
+		}
 		s.stats.discardedUploads.Add(1)
 		return nil
 	}
-	if s.packs != nil {
-		return s.stagePacked(ctx, kind, digest, stored)
+	if packed {
+		retained, err := s.stagePacked(ctx, kind, digest, stored)
+		s.objectFilesMu.RUnlock()
+		if !retained {
+			s.discardPackedObject(key, stored.path)
+			if stored.path == path {
+				keep = false
+			}
+		}
+		return err
 	}
 	if kind == "ac" {
 		if err := s.validateActionResultForPublication(ctx, object{path: path, size: n}); err != nil {
@@ -247,20 +270,32 @@ func (s *Server) writeObject(
 
 // stagePacked hands an upload to the CARv2 pack writer, which publishes it as
 // part of a later batch rather than as its own backend entry.
-func (s *Server) stagePacked(ctx context.Context, kind, digest string, stored object) error {
+func (s *Server) stagePacked(ctx context.Context, kind, digest string, stored object) (bool, error) {
 	if kind == "cas" {
-		s.packs.stageCAS(digest, stored)
-		return nil
+		return s.packs.stageCAS(digest, stored), nil
 	}
 	closure, err := s.collectActionResultClosure(ctx, stored)
 	if err != nil {
-		return s.absorbActionResultFailure(digest, "staging", err)
+		return true, s.absorbActionResultFailure(digest, "staging", err)
 	}
 	if err := s.packs.stageAction(digest, stored, closure); err != nil {
-		return s.absorbSaveFailure(kind, digest, err)
+		return true, s.absorbSaveFailure(kind, digest, err)
 	}
 	s.stats.validatedActionResults.Add(1)
-	return nil
+	return true, nil
+}
+
+func (s *Server) discardPackedObject(key, path string) {
+	s.objectFilesMu.Lock()
+	defer s.objectFilesMu.Unlock()
+	s.objectsMu.Lock()
+	if current, exists := s.objects[key]; exists && current.path == path {
+		delete(s.objects, key)
+		s.objectsMu.Unlock()
+		s.packs.removeLocalFile(path)
+		return
+	}
+	s.objectsMu.Unlock()
 }
 
 // absorbActionResultFailure drops an action result that must not be published.

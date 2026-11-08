@@ -166,27 +166,31 @@ func (p *packStore) close(ctx context.Context) error {
 	err := p.flush(ctx, true)
 	p.renewPending(ctx)
 	p.codec.close()
+	p.server.objectFilesMu.Lock()
 	p.mu.Lock()
 	for _, pack := range p.loadedPacks {
 		_ = pack.store.Close()
+		p.removeLocalFile(pack.path)
 	}
 	p.mu.Unlock()
+	p.server.objectFilesMu.Unlock()
 	return err
 }
 
-func (p *packStore) stageCAS(digest string, value object) {
+func (p *packStore) stageCAS(digest string, value object) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if _, exists := p.pendingCAS[digest]; exists {
-		return
+		return true
 	}
 	if _, exists := p.cas[digest]; exists {
-		return
+		return false
 	}
 	p.pendingCAS[digest] = value
 	p.pendingCASOrder = append(p.pendingCASOrder, digest)
 	p.pendingBytes += value.size
 	p.requestFlushLocked()
+	return true
 }
 
 func (p *packStore) stageAction(digest string, value object, closure []digestReference) error {
@@ -523,6 +527,12 @@ func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor)
 		return loadedPack{}, err
 	}
 	path := file.Name()
+	keep := false
+	defer func() {
+		if !keep {
+			p.removeLocalFile(path)
+		}
+	}()
 	limited := &maxWriter{writer: file, remaining: p.server.cfg.MaxBlobSize}
 	backendCtx, cancel := context.WithTimeout(ctx, p.server.cfg.BackendTimeout)
 	found, err := p.server.cfg.Backend.Load(backendCtx, descriptor.Key, limited)
@@ -567,6 +577,7 @@ func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor)
 	if err != nil {
 		return loadedPack{}, fmt.Errorf("pack %s cannot be read: %w: %w", descriptor.ID, err, errPackUnavailable)
 	}
+	keep = true
 	return loadedPack{path: path, store: store}, nil
 }
 
@@ -609,6 +620,22 @@ func (p *packStore) flushOne(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	packRetained := false
+	defer func() {
+		if !packRetained {
+			p.removeLocalFile(packPath)
+		}
+	}()
+	packReader, err := openPackReader(packPath, p.server.cfg.MaxBlobSize)
+	if err != nil {
+		return false, fmt.Errorf("open newly built CARv2 pack: %w", err)
+	}
+	readerRetained := false
+	defer func() {
+		if !readerRetained {
+			_ = packReader.Close()
+		}
+	}()
 	pack := packDescriptor{ID: packID, Key: packKeyFor(p.keyPrefix, packID), Size: packSize}
 	if err := p.publishFile(ctx, pack.Key, packPath, packSize); err != nil {
 		return false, fmt.Errorf("publish CARv2 pack: %w", err)
@@ -627,14 +654,19 @@ func (p *packStore) flushOne(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	defer p.removeLocalFile(manifestPath)
 	if err := p.publishFile(ctx, manifestKeyFor(p.keyPrefix, pack.ID, manifestID), manifestPath, int64(len(manifestData))); err != nil {
 		return false, fmt.Errorf("publish manifest commit point: %w", err)
 	}
 	p.server.stats.manifestUploads.Add(1)
 	p.mu.Lock()
 	p.applyManifestLocked(manifestID, manifestValue)
+	p.loadedPacks[pack.ID] = loadedPack{path: packPath, store: packReader}
 	p.removePendingLocked(casDigests, actionDigests)
 	p.mu.Unlock()
+	readerRetained = true
+	packRetained = true
+	p.discardPackedObjects(casDigests, casValues, actionDigests, actionValues)
 	return true, nil
 }
 
@@ -725,6 +757,12 @@ func (p *packStore) buildPack(
 	if err != nil {
 		return "", packedEntries{}, 0, "", err
 	}
+	keep := false
+	defer func() {
+		if !keep {
+			p.removeLocalFile(path)
+		}
+	}()
 	store, err := openPackWriter(path, blocksToWrite[0].cid)
 	if err != nil {
 		return "", packedEntries{}, 0, "", err
@@ -759,6 +797,7 @@ func (p *packStore) buildPack(
 	if closeErr != nil {
 		return "", packedEntries{}, 0, "", closeErr
 	}
+	keep = true
 	return path, entries, info.Size(), packID, nil
 }
 
@@ -877,6 +916,45 @@ func (p *packStore) removePendingLocked(casDigests, actionDigests []string) {
 	}
 	p.pendingCASOrder = filterPending(p.pendingCASOrder, p.pendingCAS)
 	p.pendingACOrder = filterPending(p.pendingACOrder, p.pendingActions)
+}
+
+func (p *packStore) discardPackedObjects(
+	casDigests []string,
+	casValues []object,
+	actionDigests []string,
+	actionValues []pendingAction,
+) {
+	paths := make(map[string]struct{}, len(casValues)+len(actionValues))
+	p.server.objectFilesMu.Lock()
+	defer p.server.objectFilesMu.Unlock()
+	p.server.objectsMu.Lock()
+	for i, digest := range casDigests {
+		key := p.server.objectKey("cas", digest)
+		if current, exists := p.server.objects[key]; exists && current.path == casValues[i].path {
+			delete(p.server.objects, key)
+			paths[current.path] = struct{}{}
+		}
+	}
+	for i, digest := range actionDigests {
+		key := p.server.objectKey("ac", digest)
+		if current, exists := p.server.objects[key]; exists && current.path == actionValues[i].object.path {
+			delete(p.server.objects, key)
+			paths[current.path] = struct{}{}
+		}
+	}
+	p.server.objectsMu.Unlock()
+	for path := range paths {
+		p.removeLocalFile(path)
+	}
+}
+
+func (p *packStore) removeLocalFile(path string) {
+	err := p.server.fileIO.do(context.Background(), func() error {
+		return os.Remove(path)
+	})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		p.server.cfg.Logger.Printf("remove local packed-cache file: %v", err)
+	}
 }
 
 func filterPending[T any](order []string, values map[string]T) []string {
