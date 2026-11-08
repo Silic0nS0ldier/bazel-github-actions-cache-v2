@@ -72,13 +72,12 @@ type manifestObject struct {
 }
 
 type manifestAction struct {
-	Digest       string
-	CID          string
-	Block        string
-	Encoding     string
-	PackID       string
-	Size         int64
-	ClosurePacks []string
+	Digest   string
+	CID      string
+	Block    string
+	Encoding string
+	PackID   string
+	Size     int64
 }
 
 func encodeManifest(value manifest) ([]byte, string, error) {
@@ -174,14 +173,12 @@ func assembleManifestActions(assembler datamodel.MapAssembler, actions []manifes
 	}
 	encoded := version >= manifestFormatVersion
 	for _, action := range actions {
-		closure := append([]string(nil), action.ClosurePacks...)
-		sort.Strings(closure)
 		fields := []struct{ key, value string }{
 			{"cid", action.CID},
 			{"digest", action.Digest},
 			{"pack", action.PackID},
 		}
-		if encoded {
+		if encoded && (action.Encoding != blockEncodingRaw || action.Block != action.CID) {
 			fields = append(fields,
 				struct{ key, value string }{"block", action.Block},
 				struct{ key, value string }{"encoding", action.Encoding},
@@ -197,7 +194,8 @@ func assembleManifestActions(assembler datamodel.MapAssembler, actions []manifes
 				return err
 			}
 		}
-		if err := assembleStringList(mapAssembler, "closure", closure); err != nil {
+		// Keep the field for format 2 readers, but do not retain unused IDs.
+		if err := assembleStringList(mapAssembler, "closure", nil); err != nil {
 			return err
 		}
 		if err := assembleInt(mapAssembler, "size", action.Size); err != nil {
@@ -225,7 +223,7 @@ func assembleManifestCAS(assembler datamodel.MapAssembler, objects []manifestObj
 			{"digest", object.Digest},
 			{"pack", object.PackID},
 		}
-		if encoded {
+		if encoded && (object.Encoding != blockEncodingRaw || object.Block != object.CID) {
 			fields = append(fields,
 				struct{ key, value string }{"block", object.Block},
 				struct{ key, value string }{"encoding", object.Encoding},
@@ -346,6 +344,17 @@ func nodeToManifest(node datamodel.Node) (manifest, error) {
 	if err != nil {
 		return manifest{}, err
 	}
+	packIDs := make(map[string]string, len(packs))
+	for _, pack := range packs {
+		packIDs[pack.ID] = pack.ID
+	}
+	// Reuse the descriptor's string storage for every entry in its pack.
+	for i := range cas {
+		cas[i].PackID = packIDs[cas[i].PackID]
+	}
+	for i := range actions {
+		actions[i].PackID = packIDs[actions[i].PackID]
+	}
 	value := manifest{Version: version, Parents: parents, Packs: packs, CAS: cas, Actions: actions}
 	if err := value.validate(); err != nil {
 		return manifest{}, err
@@ -393,11 +402,6 @@ func (value manifest) validate() error {
 		}
 		if _, ok := packIDs[action.PackID]; !ok {
 			return errors.New("action entry references an undeclared pack")
-		}
-		for _, packID := range action.ClosurePacks {
-			if _, ok := packIDs[packID]; !ok && !digestPattern.MatchString(packID) {
-				return errors.New("action closure has invalid pack ID")
-			}
 		}
 		if _, duplicate := seenActions[action.Digest]; duplicate {
 			return errors.New("manifest repeats an action digest")
@@ -496,22 +500,35 @@ func nodeActions(node datamodel.Node) ([]manifestAction, error) {
 		if err != nil {
 			return nil, err
 		}
-		closure, err := nodeStringList(item, "closure")
-		if err != nil {
-			return nil, err
+		closure, err := item.LookupByString("closure")
+		if err != nil || closure.Kind() != datamodel.Kind_List {
+			return nil, errors.New("manifest closure must be a list")
+		}
+		closureIterator := closure.ListIterator()
+		for !closureIterator.Done() {
+			_, pack, err := closureIterator.Next()
+			if err != nil || pack.Kind() != datamodel.Kind_String {
+				return nil, errors.New("manifest closure must contain strings")
+			}
+			packID, err := pack.AsString()
+			if err != nil {
+				return nil, err
+			}
+			if !digestPattern.MatchString(packID) {
+				return nil, errors.New("action closure has invalid pack ID")
+			}
 		}
 		block, encoding, err := nodeBlockEncoding(item, contentCID)
 		if err != nil {
 			return nil, err
 		}
 		values = append(values, manifestAction{
-			Digest:       digest,
-			CID:          contentCID,
-			Block:        block,
-			Encoding:     encoding,
-			PackID:       packID,
-			Size:         size,
-			ClosurePacks: closure,
+			Digest:   digest,
+			CID:      contentCID,
+			Block:    block,
+			Encoding: encoding,
+			PackID:   packID,
+			Size:     size,
 		})
 	}
 	return values, nil

@@ -32,13 +32,12 @@ func TestManifestDAGCBORRoundTripIsDeterministic(t *testing.T) {
 			Size:   3,
 		}},
 		Actions: []manifestAction{{
-			Digest:       digest([]byte("action")),
-			CID:          actionCID.String(),
-			Block:        compressedCID.String(),
-			Encoding:     blockEncodingZstd,
-			PackID:       packID,
-			Size:         2,
-			ClosurePacks: []string{packID},
+			Digest:   digest([]byte("action")),
+			CID:      actionCID.String(),
+			Block:    compressedCID.String(),
+			Encoding: blockEncodingZstd,
+			PackID:   packID,
+			Size:     2,
 		}},
 	}
 	encoded, manifestCID, err := encodeManifest(value)
@@ -55,6 +54,78 @@ func TestManifestDAGCBORRoundTripIsDeterministic(t *testing.T) {
 	}
 	if manifestCID != secondCID || !bytes.Equal(encoded, reencoded) {
 		t.Fatal("DAG-CBOR manifest is not deterministic")
+	}
+}
+
+func TestManifestFormatTwoOmitsRawBlockMetadataAndClosureValues(t *testing.T) {
+	packID := digest([]byte("pack"))
+	casData := []byte("raw cas")
+	casDigest := digest(casData)
+	casCID, err := rawCIDForDigest(casDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionData := []byte{0x08, 0x01}
+	actionCID, err := rawCIDForData(actionData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := manifest{
+		Version: manifestFormatVersion,
+		Packs:   []packDescriptor{{ID: packID, Key: packKeyFor("test", packID), Size: 128}},
+		CAS: []manifestObject{{
+			Digest: casDigest, CID: casCID.String(), Block: casCID.String(),
+			PackID: packID, Size: int64(len(casData)),
+		}},
+		Actions: []manifestAction{{
+			Digest: digest(actionData), CID: actionCID.String(), Block: actionCID.String(),
+			PackID: packID, Size: int64(len(actionData)),
+		}},
+	}
+	node, err := manifestToNode(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	casList, err := node.LookupByString("cas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, casEntry, err := casList.ListIterator().Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := casEntry.LookupByString("block"); err == nil {
+		t.Fatal("raw CAS entry contains redundant block field")
+	}
+	if _, err := casEntry.LookupByString("encoding"); err == nil {
+		t.Fatal("raw CAS entry contains redundant encoding field")
+	}
+	casBlock, casEncoding, err := nodeBlockEncoding(casEntry, casCID.String())
+	if err != nil || casBlock != casCID.String() || casEncoding != blockEncodingRaw {
+		t.Fatalf("omitted raw CAS fields decode as %q/%q, err %v", casBlock, casEncoding, err)
+	}
+
+	actionList, err := node.LookupByString("actions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, actionEntry, err := actionList.ListIterator().Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := actionEntry.LookupByString("block"); err == nil {
+		t.Fatal("raw action entry contains redundant block field")
+	}
+	if _, err := actionEntry.LookupByString("encoding"); err == nil {
+		t.Fatal("raw action entry contains redundant encoding field")
+	}
+	closure, err := nodeStringList(actionEntry, "closure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closure) != 0 {
+		t.Fatalf("new action manifest carries unused closure IDs: %v", closure)
 	}
 }
 

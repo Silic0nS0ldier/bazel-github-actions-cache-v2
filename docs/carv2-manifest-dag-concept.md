@@ -90,9 +90,16 @@ Manifest {
   parents: [ManifestCID]
   packs: [PackDescriptor { pack_cid, cache_key, byte_size }]
   cas_entries: [CASDigest -> PackCID]
-  action_entries: [ActionDigest -> ActionResultCID, closure_pack_cids]
+  action_entries: [ActionDigest -> ActionResultCID]
 }
 ```
+
+Format 2 still writes an empty `closure` list on each action entry for
+compatibility with older readers. Legacy closure values are ignored; runtime
+closure validation uses the Action Result itself.
+Raw entries omit `block` and `encoding`, which default to the content CID and
+verbatim bytes. The server's long-lived CAS index derives the content CID from
+the digest and retains a block CID only for compressed entries.
 
 Entries are deltas introduced by that manifest, not a full copy of every
 ancestor. A reader merges them from the roots toward the heads. The mapping
@@ -157,9 +164,9 @@ merge.
 1. Bootstrap an in-memory manifest view from all discoverable heads. Manifests
    whose pack is absent from the pack listing are skipped without being read.
 2. For `GET /ac/<action-digest>`, resolve the Action Result mapping and restore
-   its pack, then confirm every declared closure member is mapped to a pack
-   that still exists and has the declared size. Closure packs are not restored;
-   their retention is renewed instead.
+   its pack, then confirm every closure member referenced by the Action Result
+   is mapped to a pack that still exists and has the declared size. Closure
+   packs are not restored; their retention is renewed instead.
 3. For `GET /cas/<digest>`, resolve its pack, restore it on demand, look up the
    CID in the CARv2 index, and verify digest and size before responding.
 4. If a manifest, pack, or closure member is missing or fails verification,

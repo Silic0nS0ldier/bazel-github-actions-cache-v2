@@ -39,7 +39,7 @@ type packStore struct {
 	mu              sync.Mutex
 	packs           map[string]packDescriptor
 	declaredBytes   map[string]int64
-	cas             map[string]manifestObject
+	cas             map[string]casEntry
 	actions         map[string]manifestAction
 	actionConflicts map[string]struct{}
 	heads           map[string]struct{}
@@ -67,6 +67,14 @@ type pendingAction struct {
 	object  object
 	closure []digestReference
 	cid     string
+}
+
+type casEntry struct {
+	// Raw block IDs and content CIDs are reconstructed from the map's digest key.
+	block    string
+	encoding string
+	packID   string
+	size     int64
 }
 
 type packLoad struct {
@@ -107,7 +115,7 @@ func newPackStore(server *Server) (*packStore, error) {
 		maxManifests:    server.cfg.MaxManifests,
 		packs:           make(map[string]packDescriptor),
 		declaredBytes:   make(map[string]int64),
-		cas:             make(map[string]manifestObject),
+		cas:             make(map[string]casEntry),
 		actions:         make(map[string]manifestAction),
 		actionConflicts: make(map[string]struct{}),
 		heads:           make(map[string]struct{}),
@@ -245,8 +253,17 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 			p.mu.Unlock()
 			return object{}, false, nil
 		}
-		contentCID, blockCID, encoding = entry.CID, entry.Block, entry.Encoding
-		packID, expectedSize = entry.PackID, entry.Size
+		content, err := rawCIDForDigest(digest)
+		if err != nil {
+			p.mu.Unlock()
+			return object{}, false, err
+		}
+		contentCID = content.String()
+		blockCID, encoding = entry.block, entry.encoding
+		if blockCID == "" {
+			blockCID = contentCID
+		}
+		packID, expectedSize = entry.packID, entry.size
 	} else {
 		entry, found := p.actions[digest]
 		if !found {
@@ -303,7 +320,7 @@ func (p *packStore) packFor(kind, digest string) string {
 	defer p.mu.Unlock()
 	if kind == "cas" {
 		if entry, found := p.cas[digest]; found {
-			return entry.PackID
+			return entry.packID
 		}
 		return ""
 	}
@@ -320,11 +337,11 @@ func (p *packStore) presence(digest string) (int64, bool) {
 	if !found {
 		return 0, false
 	}
-	if !p.packRestorableLocked(entry.PackID) {
+	if !p.packRestorableLocked(entry.packID) {
 		return 0, false
 	}
-	p.scheduleRenewalLocked(entry.PackID)
-	return entry.Size, true
+	p.scheduleRenewalLocked(entry.packID)
+	return entry.size, true
 }
 
 // packRestorableLocked reports whether a pack is still believed to be
@@ -612,7 +629,7 @@ func (p *packStore) flushOne(ctx context.Context) (bool, error) {
 
 	p.mu.Lock()
 	p.listedPacks[pack.ID] = struct{}{}
-	manifestValue := p.manifestForPackLocked(pack, entries, selectedCAS)
+	manifestValue := p.manifestForPackLocked(pack, entries)
 	p.mu.Unlock()
 	manifestData, manifestID, err := encodeManifest(manifestValue)
 	if err != nil {
@@ -772,28 +789,12 @@ func (p *packStore) buildPack(
 func (p *packStore) manifestForPackLocked(
 	pack packDescriptor,
 	entries packedEntries,
-	selectedCAS map[string]struct{},
 ) manifest {
 	for index := range entries.cas {
 		entries.cas[index].PackID = pack.ID
 	}
 	for index := range entries.actions {
 		entries.actions[index].PackID = pack.ID
-		closure := make(map[string]struct{})
-		pending := p.pendingActions[entries.actions[index].Digest]
-		for _, reference := range pending.closure {
-			if isImplicitEmptyDigest(reference) {
-				continue
-			}
-			if _, selected := selectedCAS[reference.hash]; selected {
-				closure[pack.ID] = struct{}{}
-				continue
-			}
-			if previous, found := p.cas[reference.hash]; found {
-				closure[previous.PackID] = struct{}{}
-			}
-		}
-		entries.actions[index].ClosurePacks = sortedStringsFromSet(closure)
 	}
 	return manifest{
 		Version: manifestFormatVersion,
@@ -1104,12 +1105,21 @@ func (p *packStore) applyManifestLocked(id string, value manifest) {
 	}
 	for _, object := range value.CAS {
 		declared += object.Size
-		if existing, found := p.cas[object.Digest]; !found || preferObject(object, existing) {
-			p.cas[object.Digest] = object
+		existing, found := p.cas[object.Digest]
+		if !found || object.PackID < existing.packID {
+			block := object.Block
+			if object.Encoding == blockEncodingRaw {
+				block = ""
+			}
+			p.cas[object.Digest] = casEntry{
+				block: block, encoding: object.Encoding,
+				packID: p.packs[object.PackID].ID, size: object.Size,
+			}
 		}
 	}
 	for _, action := range value.Actions {
 		declared += action.Size
+		action.PackID = p.packs[action.PackID].ID
 		existing, found := p.actions[action.Digest]
 		if found && existing.CID != action.CID {
 			if _, counted := p.actionConflicts[action.Digest]; !counted {

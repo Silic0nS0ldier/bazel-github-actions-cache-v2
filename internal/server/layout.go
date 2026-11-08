@@ -32,9 +32,6 @@ type LayoutEntry struct {
 	Encoding string
 	Pack     string
 	Size     int64
-	// ClosurePacks is carried forward verbatim. Nothing reads it at runtime, so
-	// it may name packs a later pass has already removed.
-	ClosurePacks []string
 }
 
 // LayoutManifest names a manifest that contributed to the merged view.
@@ -256,7 +253,6 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 		layout.Entries = append(layout.Entries, LayoutEntry{
 			Kind: "ac", Digest: action.Digest, CID: action.CID, Block: action.Block,
 			Encoding: action.Encoding, Pack: action.PackID, Size: action.Size,
-			ClosurePacks: action.ClosurePacks,
 		})
 	}
 	sort.Slice(layout.Entries, func(i, j int) bool {

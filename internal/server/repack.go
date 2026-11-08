@@ -206,7 +206,6 @@ func (r *Repacker) publishManifest(ctx context.Context, pack LayoutPack, entries
 			value.Actions = append(value.Actions, manifestAction{
 				Digest: entry.Digest, CID: entry.CID, Block: entry.Block,
 				Encoding: entry.Encoding, PackID: pack.ID, Size: entry.Size,
-				ClosurePacks: entry.ClosurePacks,
 			})
 		default:
 			return "", fmt.Errorf("unknown entry kind %q", entry.Kind)

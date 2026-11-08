@@ -129,6 +129,31 @@ func TestPackedStoreRoundTripCommitsPackBeforeManifest(t *testing.T) {
 	}
 }
 
+func TestPackedStoreIndexesRawCASWithoutRedundantBlockID(t *testing.T) {
+	server := testPackedServer(t, newMemoryBackend())
+	payload := []byte("raw object")
+	objectDigest := digest(payload)
+	if response := putCacheObject(server, "/cas/"+objectDigest, payload); response.Code != http.StatusNoContent {
+		t.Fatalf("CAS PUT = %d, body = %s", response.Code, response.Body.String())
+	}
+	if err := server.packs.flush(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	server.packs.mu.Lock()
+	entry, found := server.packs.cas[objectDigest]
+	server.packs.mu.Unlock()
+	if !found {
+		t.Fatal("flushed CAS object is absent from the packed index")
+	}
+	if entry.block != "" || entry.encoding != blockEncodingRaw || entry.size != int64(len(payload)) {
+		t.Fatalf("raw CAS index entry retains redundant metadata: %+v", entry)
+	}
+	if response := readCacheObject(server, "/cas/"+objectDigest); response.Code != http.StatusOK || response.Body.String() != string(payload) {
+		t.Fatalf("CAS GET = %d, body = %q", response.Code, response.Body.String())
+	}
+	closePackedServer(t, server)
+}
+
 func TestPackedStoreFlushReplacesUploadSpoolsWithLocalPack(t *testing.T) {
 	server := testPackedServer(t, newMemoryBackend())
 	payload := []byte("keep only the committed pack")
