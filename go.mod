@@ -14,7 +14,7 @@ require (
 
 require (
 	cloud.google.com/go/longrunning v1.2.0
-	github.com/klauspost/compress v1.20.0
+	github.com/klauspost/compress v1.20.2
 	golang.org/x/sync v0.23.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20260706201446-f0a921348800
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800
