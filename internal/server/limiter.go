@@ -6,11 +6,10 @@ import (
 	"time"
 )
 
-// intervalLimiter spaces reservations evenly to stay below GitHub's documented
+// intervalLimiter spaces upload starts evenly to stay below GitHub's documented
 // 200 cache uploads/minute limit. It deliberately has no burst allowance.
 type intervalLimiter struct {
 	mu       sync.Mutex
-	next     time.Time
 	last     time.Time
 	interval time.Duration
 }
@@ -26,26 +25,23 @@ func (l *intervalLimiter) wait(ctx context.Context) (bool, error) {
 	if l.interval == 0 {
 		return false, nil
 	}
-	l.mu.Lock()
-	now := time.Now()
-	slot := now
-	if l.next.After(now) {
-		slot = l.next
-	}
-	l.next = slot.Add(l.interval)
-	l.mu.Unlock()
-
-	delay := time.Until(slot)
-	if delay <= 0 {
-		return false, nil
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return true, ctx.Err()
-	case <-timer.C:
-		return true, nil
+	waited := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return waited, err
+		}
+		delay := l.claimStart()
+		if delay <= 0 {
+			return waited, nil
+		}
+		waited = true
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return true, ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 

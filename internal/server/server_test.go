@@ -439,10 +439,19 @@ func TestIntervalLimiterHonorsCancellation(t *testing.T) {
 	if waited, err := limiter.wait(context.Background()); err != nil || waited {
 		t.Fatalf("first wait = %t, %v", waited, err)
 	}
+	limiter.mu.Lock()
+	firstStart := limiter.last
+	limiter.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	if waited, err := limiter.wait(ctx); !waited || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("second wait = %t, %v", waited, err)
+	}
+	limiter.mu.Lock()
+	last := limiter.last
+	limiter.mu.Unlock()
+	if !last.Equal(firstStart) {
+		t.Fatalf("cancelled wait changed the last start time: %s, want %s", last, firstStart)
 	}
 }
 
@@ -465,9 +474,8 @@ func TestThrottledPublishDoesNotHoldBackendSlot(t *testing.T) {
 	server := testServer(t, newMemoryBackend(), func(cfg *Config) {
 		cfg.MaxConcurrent = 1
 	})
-	reservedFor := time.Now().Add(time.Second)
 	server.limiter.mu.Lock()
-	server.limiter.next = reservedFor
+	server.limiter.last = time.Now()
 	server.limiter.mu.Unlock()
 
 	file, err := os.CreateTemp(server.cfg.CacheDir, "test-publish-*")
@@ -486,19 +494,7 @@ func TestThrottledPublishDoesNotHoldBackendSlot(t *testing.T) {
 	}()
 	defer cancel()
 
-	reservationDeadline := time.Now().Add(time.Second)
-	for {
-		server.limiter.mu.Lock()
-		reserved := server.limiter.next.After(reservedFor)
-		server.limiter.mu.Unlock()
-		if reserved {
-			break
-		}
-		if time.Now().After(reservationDeadline) {
-			t.Fatal("publish did not reserve a rate-limit slot")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	time.Sleep(10 * time.Millisecond)
 
 	readCtx, stopWaiting := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer stopWaiting()

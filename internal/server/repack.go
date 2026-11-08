@@ -333,14 +333,14 @@ func (r *Repacker) load(ctx context.Context, packID string) (string, *blockstore
 }
 
 func (r *Repacker) publishFile(ctx context.Context, key, path string, size int64) error {
-	if _, err := r.limiter.wait(ctx); err != nil {
-		return err
-	}
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	if _, err := r.limiter.wait(ctx); err != nil {
+		return err
+	}
 	saveCtx, cancel := context.WithTimeout(ctx, r.options.Timeout)
 	defer cancel()
 	return r.options.Backend.Save(saveCtx, key, file, size)

@@ -597,12 +597,13 @@ func (s *Server) publishOnce(ctx context.Context, key string, file *os.File, siz
 }
 
 func (s *Server) publish(ctx context.Context, key string, file *os.File, size int64) error {
-	waited, err := s.limiter.wait(ctx)
-	if err != nil {
-		return err
-	}
+	waited := false
 	for {
 		if err := s.acquire(ctx); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			s.release()
 			return err
 		}
 		delay := s.limiter.claimStart()
