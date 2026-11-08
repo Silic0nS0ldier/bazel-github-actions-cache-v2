@@ -143,6 +143,53 @@ function formatBytes(value) {
   return "0B";
 }
 
+// The first line of a Go runtime crash: a panic, a fatal error, or the
+// runtime's own diagnostic that precedes some fatal errors.
+const crashLine = /^(?:panic: |fatal error: |runtime: )/m;
+
+function omission(count) {
+  return `[... ${formatCount(count)} characters omitted ...]\n`;
+}
+
+// logExcerpt keeps a log readable in the job output. Its head shows how the
+// server started, its tail what it did last, and the start of a crash is kept
+// in between because a runtime dump lists every goroutine and pushes the fatal
+// error itself far out of the tail. Cuts fall on line boundaries.
+function logExcerpt(text, { headChars = 4000, crashChars = 4000, tailChars = 16000 } = {}) {
+  if (text.length <= headChars + crashChars + tailChars) {
+    return text;
+  }
+  const cutBefore = (limit) => {
+    const newline = text.lastIndexOf("\n", limit - 1);
+    return newline >= 0 ? newline + 1 : limit;
+  };
+  const cutAfter = (start) => {
+    const newline = text.indexOf("\n", start);
+    return newline >= 0 ? newline + 1 : start;
+  };
+
+  const headEnd = cutBefore(headChars);
+  const tailStart = Math.max(headEnd, cutAfter(text.length - tailChars));
+  const ranges = [[0, headEnd]];
+  const crash = crashLine.exec(text.slice(headEnd, tailStart));
+  if (crash) {
+    const start = headEnd + crash.index;
+    ranges.push([start, Math.min(tailStart, cutBefore(start + crashChars))]);
+  }
+  ranges.push([tailStart, text.length]);
+
+  let excerpt = "";
+  let previousEnd = 0;
+  for (const [start, end] of ranges) {
+    if (start > previousEnd) {
+      excerpt += omission(start - previousEnd);
+    }
+    excerpt += text.slice(start, end);
+    previousEnd = end;
+  }
+  return excerpt;
+}
+
 module.exports = {
   appendCommand,
   booleanFlag,
@@ -151,6 +198,7 @@ module.exports = {
   formatCount,
   input,
   isForkPullRequest,
+  logExcerpt,
   mask,
   parseBoolean,
   request,
