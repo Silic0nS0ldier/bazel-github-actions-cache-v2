@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -126,6 +127,15 @@ func TestFetchBlobFetchesAndPublishesOnMiss(t *testing.T) {
 	if got := backend.objects["test-v1-cas-"+reference.hash]; string(got) != string(asset) {
 		t.Fatalf("asset was not published: %q", got)
 	}
+	server.objectsMu.RLock()
+	cached, ok := server.objects[server.objectKey("cas", reference.hash)]
+	server.objectsMu.RUnlock()
+	if !ok || !strings.HasPrefix(filepath.Base(cached.path), "asset-") {
+		t.Fatalf("cached asset was not retained from its download spool: %+v", cached)
+	}
+	if uploads := spoolFiles(t, server.cfg.CacheDir); len(uploads) != 0 {
+		t.Fatalf("asset publication created a second upload spool: %v", uploads)
+	}
 	if stats := server.Snapshot(); stats.AssetDownloads != 1 || stats.Uploads != 1 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -161,6 +171,9 @@ func TestFetchBlobRejectsContentThatFailsItsChecksum(t *testing.T) {
 	}
 	if len(backend.objects) != 0 {
 		t.Fatalf("unverified content was published: %v", backend.objects)
+	}
+	if assets := cacheFilesWithPrefix(t, server.cfg.CacheDir, "asset-"); len(assets) != 0 {
+		t.Fatalf("unverified asset spools were not cleaned up: %v", assets)
 	}
 	if stats := server.Snapshot(); stats.AssetFetchErrors != 1 {
 		t.Fatalf("unexpected stats: %+v", stats)

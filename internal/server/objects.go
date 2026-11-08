@@ -249,6 +249,20 @@ func (s *Server) writeObject(
 		return errLocalFailure
 	}
 
+	keep, err = s.storeObjectFile(ctx, kind, digest, file, path, n)
+	return err
+}
+
+// storeObjectFile retains a verified spool locally and sends it through the
+// normal publication path without copying or hashing it again.
+func (s *Server) storeObjectFile(
+	ctx context.Context,
+	kind, digest string,
+	file *os.File,
+	path string,
+	size int64,
+) (bool, error) {
+	keep := false
 	packed := s.packs != nil
 	if packed {
 		s.objectFilesMu.RLock()
@@ -257,7 +271,7 @@ func (s *Server) writeObject(
 	s.objectsMu.Lock()
 	stored, exists := s.objects[key]
 	if !exists {
-		stored = object{path: path, size: n}
+		stored = object{path: path, size: size}
 		s.objects[key] = stored
 		keep = true
 	}
@@ -268,7 +282,7 @@ func (s *Server) writeObject(
 			s.objectFilesMu.RUnlock()
 		}
 		s.stats.discardedUploads.Add(1)
-		return nil
+		return keep, nil
 	}
 	if packed {
 		retained, err := s.stagePacked(ctx, kind, digest, stored)
@@ -279,25 +293,25 @@ func (s *Server) writeObject(
 				keep = false
 			}
 		}
-		return err
+		return keep, err
 	}
 	if kind == "ac" {
-		if err := s.validateActionResultForPublication(ctx, object{path: path, size: n}); err != nil {
-			return s.absorbActionResultFailure(digest, "publishing", err)
+		if err := s.validateActionResultForPublication(ctx, object{path: path, size: size}); err != nil {
+			return keep, s.absorbActionResultFailure(digest, "publishing", err)
 		}
 		s.stats.validatedActionResults.Add(1)
 	}
 
-	deduplicated, err := s.publishOnce(ctx, key, file, n)
+	deduplicated, err := s.publishOnce(ctx, key, file, size)
 	if err != nil {
-		return s.absorbSaveFailure(kind, digest, err)
+		return keep, s.absorbSaveFailure(kind, digest, err)
 	}
 	if deduplicated {
 		s.stats.deduplicatedUploads.Add(1)
 	} else {
 		s.stats.uploads.Add(1)
 	}
-	return nil
+	return keep, nil
 }
 
 // stagePacked hands an upload to the CARv2 pack writer, which publishes it as
