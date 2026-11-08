@@ -220,12 +220,27 @@ Do not enable Bazel remote-cache compression with this release.
 | `grpc-port` | `0` | Loopback port for the gRPC API; zero chooses a free dynamic port |
 | `asset-header-routes` | `` | URI patterns, one per line, whose credentials the downloader may forward |
 | `usage-artifact` | `bazel-cache-usage` | Job artifact to publish the usage record to; empty disables it |
+| `log-artifact` | `bazel-cache-server-log` | Job artifact to publish the full server log to; empty disables it |
 
 The main step outputs `url`, `grpc-url`, `stats-url`, `writable`,
 `bazel-args`, `grpc-bazel-args`, and `initial-stats`. The post step emits
 `final-stats` and always writes the final counts to the job summary. Because
 post steps run after normal job steps, consume `stats-url` during the job if a
 later step must read it.
+
+### Server log
+
+The post step prints an excerpt of the server log to the job output: its first
+lines, the start of any Go runtime crash (`panic:`, `fatal error:`, or
+`runtime:`), and its last lines. A crash dump lists every goroutine, so without
+the middle section the fatal error itself would scroll out of a plain tail.
+
+The whole log is also published as a job artifact named by `log-artifact`,
+holding a single `cache-server.log`, including when the server never became
+ready. A log over 256 MiB keeps its first and last 128 MiB. As with
+`usage-artifact`, use a distinct name per instance if one job runs this action
+more than once, or an empty string to opt out. A failed upload warns and never
+fails the job.
 
 ### Which entries a job used
 

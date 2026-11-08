@@ -5,7 +5,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const { buildSummary } = require("./post");
+const os = require("node:os");
+
+const { buildSummary, publishLog } = require("./post");
 
 const statsSource = fs.readFileSync(
   path.join(__dirname, "..", "internal", "server", "stats.go"),
@@ -97,4 +99,136 @@ test("byte statistics render as sizes and the rest as counts", () => {
   const summary = buildSummary({ bytes_served: 2 * 1024 ** 3, hits: 1024 });
   assert.match(summary, /\| Served \| 2GiB \|/);
   assert.match(summary, /\| Hits \| 1,024 \|/);
+});
+
+const uploadCommandSource = fs.readFileSync(
+  path.join(__dirname, "..", "cmd", "cache-server", "upload_artifact.go"),
+  "utf8",
+);
+
+function existingBinary(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "post-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const binary = path.join(directory, "cache-server");
+  fs.writeFileSync(binary, "");
+  return binary;
+}
+
+function capture() {
+  const output = { stdout: "", stderr: "" };
+  return {
+    output,
+    write: (text) => {
+      output.stdout += text;
+    },
+    warn: (text) => {
+      output.stderr += text;
+    },
+  };
+}
+
+test("the server log is published through the server binary", (t) => {
+  const binary = existingBinary(t);
+  const calls = [];
+  const { output, write, warn } = capture();
+  const published = publishLog({
+    binary,
+    logFile: "/tmp/server.log",
+    name: "bazel-cache-server-log",
+    spawn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: 'published cache-server.log as artifact "bazel-cache-server-log"\n' };
+    },
+    write,
+    warn,
+  });
+  assert.equal(published, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, binary);
+  assert.deepEqual(calls[0].args.slice(0, 5), [
+    "upload-artifact",
+    "--name",
+    "bazel-cache-server-log",
+    "--file",
+    "/tmp/server.log",
+  ]);
+  assert.ok(calls[0].options.timeout > 0, "the upload must not be able to hang the post step");
+  assert.match(output.stdout, /published cache-server\.log/);
+  assert.equal(output.stderr, "");
+});
+
+// The binary is invoked by name and flag, so a rename on either side would
+// silently stop logs from being published.
+test("the upload uses the subcommand and flags the server binary defines", (t) => {
+  let args;
+  publishLog({
+    binary: existingBinary(t),
+    logFile: "/tmp/server.log",
+    name: "log",
+    spawn: (_command, given) => {
+      args = given;
+      return { status: 0, stdout: "" };
+    },
+    write: () => {},
+  });
+  const command = uploadCommandSource.match(/uploadArtifactCommandName = "([^"]+)"/);
+  assert.equal(args[0], command?.[1]);
+  const defined = new Set(
+    [...uploadCommandSource.matchAll(/flags\.[A-Za-z0-9]+\("([a-z-]+)"/g)].map((match) => match[1]),
+  );
+  for (const flag of args.filter((arg) => arg.startsWith("--"))) {
+    assert.ok(defined.has(flag.slice(2)), `${flag} is not a flag of ${args[0]}`);
+  }
+});
+
+test("a failed log upload warns rather than failing the job", (t) => {
+  const { output, write, warn } = capture();
+  const published = publishLog({
+    binary: existingBinary(t),
+    logFile: "/tmp/server.log",
+    name: "log",
+    spawn: () => ({ status: 1, stdout: "", stderr: "upload-artifact: FinalizeArtifact returned HTTP 409\n" }),
+    write,
+    warn,
+  });
+  assert.equal(published, false);
+  assert.match(output.stderr, /^::warning::cannot publish the cache server log: .*HTTP 409\n$/);
+});
+
+test("a log upload that cannot start warns", (t) => {
+  const { output, write, warn } = capture();
+  const published = publishLog({
+    binary: existingBinary(t),
+    logFile: "/tmp/server.log",
+    name: "log",
+    spawn: () => ({ error: new Error("spawnSync ETIMEDOUT"), status: null }),
+    write,
+    warn,
+  });
+  assert.equal(published, false);
+  assert.match(output.stderr, /ETIMEDOUT/);
+});
+
+test("an empty log-artifact disables publishing", () => {
+  const published = publishLog({
+    binary: "/nonexistent",
+    logFile: "/tmp/server.log",
+    name: "",
+    spawn: () => assert.fail("nothing should be spawned"),
+  });
+  assert.equal(published, false);
+});
+
+test("a missing server binary warns instead of spawning", () => {
+  const { output, write, warn } = capture();
+  const published = publishLog({
+    binary: "/nonexistent/cache-server",
+    logFile: "/tmp/server.log",
+    name: "log",
+    spawn: () => assert.fail("nothing should be spawned"),
+    write,
+    warn,
+  });
+  assert.equal(published, false);
+  assert.match(output.stderr, /server binary is gone/);
 });

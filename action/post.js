@@ -1,9 +1,11 @@
 "use strict";
 
 const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
 const {
   formatBytes,
   formatCount,
+  logExcerpt,
   request,
   safeTemporaryDirectory,
   setOutput,
@@ -130,15 +132,79 @@ function buildSummary(stats) {
   return summary;
 }
 
+const logEntryName = "cache-server.log";
+const logUploadTimeoutSeconds = 120;
+
+// publishLog keeps the whole server log as a job artifact, since the excerpt
+// printed to the job output drops the middle of a long one. The server binary
+// does the upload because a crashed server cannot publish its own log.
+function publishLog({
+  binary,
+  logFile,
+  name,
+  spawn = spawnSync,
+  write = (text) => process.stdout.write(text),
+  warn = (text) => process.stderr.write(text),
+}) {
+  if (!name) {
+    return false;
+  }
+  if (!binary || !fs.existsSync(binary)) {
+    warn("::warning::cannot publish the cache server log: the server binary is gone\n");
+    return false;
+  }
+  const result = spawn(
+    binary,
+    [
+      "upload-artifact",
+      "--name",
+      name,
+      "--file",
+      logFile,
+      "--entry-name",
+      logEntryName,
+      "--timeout",
+      `${logUploadTimeoutSeconds}s`,
+    ],
+    { encoding: "utf8", timeout: (logUploadTimeoutSeconds + 30) * 1000, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  if (result.error || result.status !== 0) {
+    const reason = result.error?.message || String(result.stderr || "").trim() || `exit status ${result.status}`;
+    warn(`::warning::cannot publish the cache server log: ${reason.replaceAll("\n", " ")}\n`);
+    return false;
+  }
+  write(String(result.stdout || ""));
+  return true;
+}
+
+function reportLog({ logFile, name, binary, print }) {
+  if (!logFile || !fs.existsSync(logFile)) {
+    return;
+  }
+  if (print) {
+    const log = fs.readFileSync(logFile, "utf8");
+    const where = name ? `; the full log is published as artifact "${name}"` : "";
+    process.stdout.write(`Cache server log (${formatBytes(Buffer.byteLength(log))}${where}):\n${logExcerpt(log)}`);
+    if (log && !log.endsWith("\n")) {
+      process.stdout.write("\n");
+    }
+  }
+  publishLog({ binary, logFile, name });
+}
+
 async function post() {
   const url = process.env.STATE_url;
   const token = process.env.STATE_shutdown_token;
   const pid = Number.parseInt(process.env.STATE_pid || "", 10);
   const statsFile = process.env.STATE_stats_file;
   const logFile = process.env.STATE_log_file;
+  const logArtifact = process.env.STATE_log_artifact || "";
+  const binary = process.env.STATE_binary;
   const tempDir = process.env.STATE_temp_dir;
   const shutdownWaitSeconds = Number.parseInt(process.env.STATE_shutdown_wait_seconds || "330", 10);
   if (!url || !token || !Number.isSafeInteger(pid)) {
+    // The main step already printed an excerpt when the server failed to start.
+    reportLog({ logFile, name: logArtifact, binary, print: false });
     process.stdout.write("Cache server state is absent; no cleanup is needed.\n");
     return;
   }
@@ -182,10 +248,7 @@ async function post() {
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, buildSummary(stats));
   }
 
-  if (logFile && fs.existsSync(logFile)) {
-    const log = fs.readFileSync(logFile, "utf8");
-    process.stdout.write(`Cache server log:\n${log.slice(-16000)}`);
-  }
+  reportLog({ logFile, name: logArtifact, binary, print: true });
   if (tempDir) {
     try {
       fs.rmSync(safeTemporaryDirectory(tempDir), { recursive: true, force: true });
@@ -201,4 +264,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { buildSummary };
+module.exports = { buildSummary, publishLog };

@@ -8,6 +8,7 @@ const { spawn } = require("node:child_process");
 const {
   input,
   booleanFlag,
+  logExcerpt,
   mask,
   parseBoolean,
   request,
@@ -25,6 +26,14 @@ function startupTimeoutMilliseconds(storageMode, backendTimeoutSeconds) {
   // requests. Its server-side discovery already has this deadline, so the
   // wrapper must not report a false startup failure after a fixed 15 seconds.
   return (storageMode === "packs" ? backendTimeoutSeconds : 15) * 1000;
+}
+
+function artifactName(name) {
+  const value = input(name, "").trim();
+  if (value && !/^[A-Za-z0-9._-]{1,180}$/.test(value)) {
+    throw new Error(`${name} must match [A-Za-z0-9._-]{1,180}`);
+  }
+  return value;
 }
 
 function positiveInteger(name, fallback, maximum = Number.MAX_SAFE_INTEGER) {
@@ -87,9 +96,10 @@ async function main() {
   }
   // Artifact names must be unique within a job, so two instances of this action
   // cannot both publish under the same one.
-  const usageArtifact = input("usage-artifact", "").trim();
-  if (usageArtifact && !/^[A-Za-z0-9._-]{1,180}$/.test(usageArtifact)) {
-    throw new Error("usage-artifact must match [A-Za-z0-9._-]{1,180}");
+  const usageArtifact = artifactName("usage-artifact");
+  const logArtifact = artifactName("log-artifact");
+  if (usageArtifact && usageArtifact === logArtifact) {
+    throw new Error("usage-artifact and log-artifact must differ");
   }
   // Validated by the server, which is what decides whether a credential is sent.
   const assetHeaderRoutes = input("asset-header-routes", "").trim();
@@ -159,6 +169,11 @@ async function main() {
     "--asset-header-routes",
     assetHeaderRoutes,
   ];
+  // Saved before startup so that the post step can publish the log of a server
+  // that never became ready.
+  saveState("binary", binary);
+  saveState("log_file", logFile);
+  saveState("log_artifact", logArtifact);
   const logDescriptor = fs.openSync(logFile, "a", 0o600);
   const child = spawn(binary, args, {
     detached: true,
@@ -183,7 +198,9 @@ async function main() {
     await sleep(100);
   }
   if (!ready) {
-    const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").slice(-8000) : "";
+    const log = fs.existsSync(logFile)
+      ? logExcerpt(fs.readFileSync(logFile, "utf8"), { headChars: 2000, crashChars: 2000, tailChars: 4000 })
+      : "";
     throw new Error(`cache server did not become ready\n${log}`);
   }
   const health = await request(`${ready.url}/ready`, { method: "GET", timeout: 2000 });
@@ -195,7 +212,6 @@ async function main() {
   saveState("pid", String(ready.pid));
   saveState("shutdown_token", shutdownToken);
   saveState("stats_file", statsFile);
-  saveState("log_file", logFile);
   saveState("temp_dir", tempDir);
   saveState("shutdown_wait_seconds", String(Math.max(60, backendTimeoutSeconds + 30)));
   setOutput("url", ready.url);
@@ -223,4 +239,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startupTimeoutMilliseconds };
+module.exports = { artifactName, startupTimeoutMilliseconds };

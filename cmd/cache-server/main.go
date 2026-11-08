@@ -33,6 +33,13 @@ type readyInfo struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == uploadArtifactCommandName {
+		if err := uploadArtifactCommand(os.Args[2:], newArtifactUploader, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Printf("fatal: %v", err)
 		os.Exit(1)
