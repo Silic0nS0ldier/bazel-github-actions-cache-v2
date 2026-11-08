@@ -53,7 +53,7 @@ func (b *byteStreamService) Read(
 		b.server.cfg.Logger.Printf("seek cache object cas/%s: %v", resource.hash, err)
 		return status.Error(codes.Internal, "local cache unavailable")
 	}
-	var reader io.Reader = gatedReader{ctx: stream.Context(), gate: b.server.fileIO, r: file}
+	reader := b.server.gateReader(stream.Context(), file)
 	if limit > 0 {
 		reader = io.LimitReader(reader, limit)
 	}

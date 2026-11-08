@@ -320,14 +320,17 @@ func TestPackedReadsShareOneReaderPerPack(t *testing.T) {
 	}
 }
 
-func TestPackedReadsWaitForFileIOSlot(t *testing.T) {
+func TestPackedReadsAvoidFileIOForRestoredObjects(t *testing.T) {
 	server, blobs := restoredPackedServer(t, 2)
 	client := bytestream.NewByteStreamClient(testGRPCConn(t, server))
-	// Restore the pack first so the gate is the only thing the read waits on.
+	// Restore the pack first so the gate only blocks file-backed operations.
 	if _, err := readBlob(t, client, blobs[0]); err != nil {
 		t.Fatal(err)
 	}
 	before := len(packedObjectFiles(t, server.cfg.CacheDir))
+	if before != 0 {
+		t.Fatalf("pack restore created %d packed-object files before the second read", before)
+	}
 
 	server.fileIO = newIOGate(1)
 	if err := server.fileIO.enter(t.Context()); err != nil {
@@ -352,17 +355,6 @@ func TestPackedReadsWaitForFileIOSlot(t *testing.T) {
 
 	select {
 	case got := <-done:
-		t.Fatalf("read finished while file io was saturated: %v", got.err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	if after := len(packedObjectFiles(t, server.cfg.CacheDir)); after != before {
-		t.Fatalf("materialized %d objects while file io was saturated", after-before)
-	}
-
-	held = false
-	server.fileIO.exit()
-	select {
-	case got := <-done:
 		if got.err != nil {
 			t.Fatal(got.err)
 		}
@@ -370,13 +362,19 @@ func TestPackedReadsWaitForFileIOSlot(t *testing.T) {
 			t.Fatal("read returned the wrong bytes")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("read did not resume after a file io slot was released")
+		t.Fatal("packed object read waited for a file io slot")
 	}
+	if after := len(packedObjectFiles(t, server.cfg.CacheDir)); after != before {
+		t.Fatalf("read created %d packed-object files", after-before)
+	}
+
+	held = false
+	server.fileIO.exit()
 }
 
-// A cache restore makes Bazel fan reads out as widely as uploads, so serving
-// must stay within the gate too.
-func TestConcurrentPackedReadBurstStaysWithinFileIOLimit(t *testing.T) {
+// Restored objects are served from decoded pack data without request-driven
+// filesystem operations, even when Bazel fans reads out widely.
+func TestConcurrentPackedReadBurstDoesNotUseFileIO(t *testing.T) {
 	const limit, reads = 4, 500
 	server, blobs := restoredPackedServer(t, reads)
 	server.fileIO = newIOGate(limit)
@@ -397,8 +395,8 @@ func TestConcurrentPackedReadBurstStaysWithinFileIOLimit(t *testing.T) {
 	}
 	wg.Wait()
 
-	if peak := server.fileIO.peak.Load(); peak > limit || peak == 0 {
-		t.Fatalf("peak concurrent file io = %d, want 1..%d", peak, limit)
+	if peak := server.fileIO.peak.Load(); peak != 0 {
+		t.Fatalf("packed reads used %d concurrent file io slots, want none (limit %d)", peak, limit)
 	}
 	if active := server.fileIO.active.Load(); active != 0 {
 		t.Fatalf("%d file io slots leaked", active)

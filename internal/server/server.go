@@ -70,8 +70,10 @@ type Config struct {
 }
 
 type object struct {
-	path string
-	size int64
+	path     string
+	data     []byte
+	inMemory bool
+	size     int64
 }
 
 type publication struct {

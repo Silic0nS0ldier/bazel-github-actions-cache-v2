@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,26 @@ import (
 	"os"
 	"sync/atomic"
 )
+
+type readSeekCloser struct {
+	*bytes.Reader
+}
+
+func (readSeekCloser) Close() error { return nil }
+
+func (o object) open() (io.ReadSeekCloser, error) {
+	if o.inMemory {
+		return readSeekCloser{Reader: bytes.NewReader(o.data)}, nil
+	}
+	return os.Open(o.path)
+}
+
+func (o object) readAll() ([]byte, error) {
+	if o.inMemory {
+		return bytes.Clone(o.data), nil
+	}
+	return os.ReadFile(o.path)
+}
 
 // Transport-neutral outcomes of a cache operation. Cache policy — the fail-open
 // decision, statistics, and redacted logging — is applied by the operations
@@ -76,19 +97,23 @@ func (s *Server) readObjectWithObjectFilesLock(ctx context.Context, kind, digest
 }
 
 // openObject resolves an object and opens it for serving. The caller closes the
-// returned file. A successful call counts a cache hit.
-func (s *Server) openObject(ctx context.Context, kind, digest string) (*os.File, int64, error) {
+// returned reader. A successful call counts a cache hit.
+func (s *Server) openObject(ctx context.Context, kind, digest string) (io.ReadSeekCloser, int64, error) {
 	s.objectFilesMu.RLock()
 	defer s.objectFilesMu.RUnlock()
 	obj, err := s.readObjectWithObjectFilesLock(ctx, kind, digest)
 	if err != nil {
 		return nil, 0, err
 	}
-	var file *os.File
-	err = s.fileIO.do(ctx, func() (err error) {
-		file, err = os.Open(obj.path)
-		return err
-	})
+	var reader io.ReadSeekCloser
+	if obj.inMemory {
+		reader, err = obj.open()
+	} else {
+		err = s.fileIO.do(ctx, func() (innerErr error) {
+			reader, innerErr = obj.open()
+			return innerErr
+		})
+	}
 	if err != nil {
 		s.stats.backendLoadErrors.Add(1)
 		s.cfg.Logger.Printf("open local cache object %s/%s: %v", kind, digest, err)
@@ -99,7 +124,7 @@ func (s *Server) openObject(ctx context.Context, kind, digest string) (*os.File,
 		return nil, 0, errLocalFailure
 	}
 	s.stats.hits.Add(1)
-	return file, obj.size, nil
+	return reader, obj.size, nil
 }
 
 // casPresence answers a presence probe from the manifest view when the storage
@@ -136,12 +161,19 @@ func (s *Server) readObjectBytes(ctx context.Context, kind, digest string) ([]by
 	}
 	defer file.Close()
 	data := make([]byte, size)
-	if _, err := io.ReadFull(gatedReader{ctx: ctx, gate: s.fileIO, r: file}, data); err != nil {
+	if _, err := io.ReadFull(s.gateReader(ctx, file), data); err != nil {
 		s.cfg.Logger.Printf("read local cache object %s/%s: %v", kind, digest, err)
 		return nil, errLocalFailure
 	}
 	s.stats.bytesServed.Add(uint64(len(data)))
 	return data, nil
+}
+
+func (s *Server) gateReader(ctx context.Context, reader io.Reader) io.Reader {
+	if _, fileBacked := reader.(*os.File); fileBacked {
+		return gatedReader{ctx: ctx, gate: s.fileIO, r: reader}
+	}
+	return reader
 }
 
 func (s *Server) validateStoredActionResult(ctx context.Context, digest string, obj object) error {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 )
 
 var (
@@ -44,7 +43,7 @@ func (s *Server) validateActionResultClosure(
 	requirePersisted bool,
 	collect bool,
 ) ([]digestReference, error) {
-	data, err := os.ReadFile(object.path)
+	data, err := object.readAll()
 	if err != nil {
 		return nil, fmt.Errorf("read action result: %w", err)
 	}
@@ -127,7 +126,7 @@ func (v *actionResultValidator) validateTree(reference digestReference) error {
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(object.path)
+	data, err := object.readAll()
 	if err != nil {
 		return fmt.Errorf("read tree CAS object %s: %w", reference.hash, err)
 	}
@@ -158,7 +157,7 @@ func (v *actionResultValidator) validateDirectoryClosure(roots []digestReference
 		if err != nil {
 			return err
 		}
-		data, err := os.ReadFile(object.path)
+		data, err := object.readAll()
 		if err != nil {
 			return fmt.Errorf("read directory CAS object %s: %w", reference.hash, err)
 		}
