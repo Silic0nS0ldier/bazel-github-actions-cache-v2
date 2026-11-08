@@ -176,13 +176,9 @@ func ReadLayout(ctx context.Context, options LayoutOptions) (Layout, error) {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	heads := make(map[string]struct{}, len(ids))
+	heads := manifestHeads(decoded)
 	for _, id := range ids {
 		value := decoded[id]
-		heads[id] = struct{}{}
-		for _, parent := range value.Parents {
-			delete(heads, parent)
-		}
 		for _, descriptor := range value.Packs {
 			if existing, found := packs[descriptor.ID]; !found || preferPack(descriptor, existing) {
 				packs[descriptor.ID] = descriptor

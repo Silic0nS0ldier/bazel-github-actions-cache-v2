@@ -1030,7 +1030,6 @@ func (p *packStore) discover(ctx context.Context) error {
 	loadedIn := time.Since(started) - listed
 
 	manifests := make(map[string]manifest, len(live))
-	parents := make(map[string]struct{})
 	for i, reference := range live {
 		value := loaded[i]
 		if value == nil {
@@ -1042,9 +1041,6 @@ func (p *packStore) discover(ctx context.Context) error {
 			continue
 		}
 		manifests[reference.id] = *value
-		for _, parent := range value.Parents {
-			parents[parent] = struct{}{}
-		}
 	}
 	ids := make([]string, 0, len(manifests))
 	for id := range manifests {
@@ -1053,10 +1049,8 @@ func (p *packStore) discover(ctx context.Context) error {
 	sort.Strings(ids)
 	for _, id := range ids {
 		p.applyManifestLocked(id, manifests[id])
-		if _, parent := parents[id]; !parent {
-			p.heads[id] = struct{}{}
-		}
 	}
+	p.heads = manifestHeads(manifests)
 	// Nothing is served until this returns, so a slow backend shows up as the
 	// server taking a long time to start for no visible reason.
 	p.server.cfg.Logger.Printf(
