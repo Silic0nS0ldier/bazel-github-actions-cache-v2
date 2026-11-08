@@ -291,11 +291,7 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 			return object{}, false, fmt.Errorf("packed CAS integrity check failed for %s", digest)
 		}
 	}
-	value, err = p.materialize(ctx, key, data)
-	if err != nil {
-		return object{}, false, err
-	}
-	return value, true, nil
+	return object{data: data, inMemory: true, size: int64(len(data))}, true, nil
 }
 
 // presence answers a CAS presence check from the manifest view alone, without
@@ -427,34 +423,6 @@ func (p *packStore) renewPending(ctx context.Context) {
 		}
 		p.server.stats.packRenewals.Add(1)
 	}
-}
-
-func (p *packStore) materialize(ctx context.Context, key string, data []byte) (object, error) {
-	p.server.objectsMu.RLock()
-	existing, exists := p.server.objects[key]
-	p.server.objectsMu.RUnlock()
-	if exists {
-		return existing, nil
-	}
-	var path string
-	err := p.server.fileIO.do(ctx, func() (err error) {
-		path, err = writePrivateTemp(p.server.cfg.CacheDir, "packed-object-*", data)
-		return err
-	})
-	if err != nil {
-		return object{}, err
-	}
-	value := object{path: path, size: int64(len(data))}
-	p.server.objectsMu.Lock()
-	if existing, exists := p.server.objects[key]; exists {
-		p.server.objectsMu.Unlock()
-		// A concurrent read materialized the object first.
-		_ = p.server.fileIO.do(context.Background(), func() error { return os.Remove(path) })
-		return existing, nil
-	}
-	p.server.objects[key] = value
-	p.server.objectsMu.Unlock()
-	return value, nil
 }
 
 func (p *packStore) loadPack(ctx context.Context, packID string) (loadedPack, error) {
