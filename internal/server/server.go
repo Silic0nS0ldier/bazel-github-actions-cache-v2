@@ -82,6 +82,7 @@ type publication struct {
 type Server struct {
 	cfg            Config
 	stats          counters
+	objectFilesMu  sync.RWMutex
 	objectsMu      sync.RWMutex
 	objects        map[string]object
 	publicationsMu sync.Mutex
