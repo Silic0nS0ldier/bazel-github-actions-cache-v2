@@ -597,15 +597,32 @@ func (s *Server) publishOnce(ctx context.Context, key string, file *os.File, siz
 }
 
 func (s *Server) publish(ctx context.Context, key string, file *os.File, size int64) error {
-	if err := s.acquire(ctx); err != nil {
+	waited, err := s.limiter.wait(ctx)
+	if err != nil {
 		return err
 	}
-	defer s.release()
-	if waited, err := s.limiter.wait(ctx); err != nil {
-		return err
-	} else if waited {
+	for {
+		if err := s.acquire(ctx); err != nil {
+			return err
+		}
+		delay := s.limiter.claimStart()
+		if delay <= 0 {
+			break
+		}
+		s.release()
+		waited = true
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if waited {
 		s.stats.throttleWaits.Add(1)
 	}
+	defer s.release()
 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err

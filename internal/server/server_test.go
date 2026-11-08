@@ -446,6 +446,73 @@ func TestIntervalLimiterHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestIntervalLimiterSpacesActualStarts(t *testing.T) {
+	limiter := &intervalLimiter{interval: 20 * time.Millisecond}
+	if delay := limiter.claimStart(); delay != 0 {
+		t.Fatalf("first start delay = %s, want none", delay)
+	}
+	delay := limiter.claimStart()
+	if delay <= 0 {
+		t.Fatalf("second start delay = %s, want a positive delay", delay)
+	}
+	time.Sleep(delay)
+	if delay := limiter.claimStart(); delay != 0 {
+		t.Fatalf("start delay after waiting = %s, want none", delay)
+	}
+}
+
+func TestThrottledPublishDoesNotHoldBackendSlot(t *testing.T) {
+	server := testServer(t, newMemoryBackend(), func(cfg *Config) {
+		cfg.MaxConcurrent = 1
+	})
+	reservedFor := time.Now().Add(time.Second)
+	server.limiter.mu.Lock()
+	server.limiter.next = reservedFor
+	server.limiter.mu.Unlock()
+
+	file, err := os.CreateTemp(server.cfg.CacheDir, "test-publish-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	published := make(chan error, 1)
+	go func() {
+		published <- server.publish(ctx, "test-key", file, 0)
+	}()
+	defer cancel()
+
+	reservationDeadline := time.Now().Add(time.Second)
+	for {
+		server.limiter.mu.Lock()
+		reserved := server.limiter.next.After(reservedFor)
+		server.limiter.mu.Unlock()
+		if reserved {
+			break
+		}
+		if time.Now().After(reservationDeadline) {
+			t.Fatal("publish did not reserve a rate-limit slot")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	readCtx, stopWaiting := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer stopWaiting()
+	if err := server.acquire(readCtx); err != nil {
+		t.Fatalf("rate-limited publish occupied the backend slot: %v", err)
+	}
+	server.release()
+
+	cancel()
+	if err := <-published; !errors.Is(err, context.Canceled) {
+		t.Fatalf("publish error = %v, want context.Canceled", err)
+	}
+}
+
 func TestSafeErrorRedactsURLsAndTokens(t *testing.T) {
 	raw := "request https://blob.example.invalid/object?sig=secret failed with " +
 		"aaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbb.cccccccccccccccc"
