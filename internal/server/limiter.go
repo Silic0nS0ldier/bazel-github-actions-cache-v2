@@ -11,6 +11,7 @@ import (
 type intervalLimiter struct {
 	mu       sync.Mutex
 	next     time.Time
+	last     time.Time
 	interval time.Duration
 }
 
@@ -46,4 +47,19 @@ func (l *intervalLimiter) wait(ctx context.Context) (bool, error) {
 	case <-timer.C:
 		return true, nil
 	}
+}
+
+func (l *intervalLimiter) claimStart() time.Duration {
+	if l.interval == 0 {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	eligible := l.last.Add(l.interval)
+	if !l.last.IsZero() && now.Before(eligible) {
+		return time.Until(eligible)
+	}
+	l.last = now
+	return 0
 }
