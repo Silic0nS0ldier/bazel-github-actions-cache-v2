@@ -100,6 +100,40 @@ func TestPlanSeparatesHotEntriesFromColdOnes(t *testing.T) {
 	}
 }
 
+func TestScheduleGroupsPrioritizesSourcePackProgress(t *testing.T) {
+	groups := []Group{
+		{Entries: []Entry{{Kind: "cas", Digest: "a-1", Pack: "pack-a", Size: 1}}},
+		{Entries: []Entry{
+			{Kind: "cas", Digest: "a-2", Pack: "pack-a", Size: 1},
+			{Kind: "cas", Digest: "b-1", Pack: "pack-b", Size: 1},
+		}},
+		{Entries: []Entry{{Kind: "cas", Digest: "b-2", Pack: "pack-b", Size: 1}}},
+	}
+	packs := []Pack{
+		{ID: "pack-a", StoredSize: 1000},
+		{ID: "pack-b", StoredSize: 500},
+	}
+
+	ordered := scheduleGroups(groups, packs)
+	if got, want := ordered[0].Entries[0].Digest, "a-2"; got != want {
+		t.Fatalf("first group starts with %q, want %q", got, want)
+	}
+	if got, want := ordered[1].Entries[0].Digest, "a-1"; got != want {
+		t.Fatalf("second group starts with %q, want %q", got, want)
+	}
+	if got, want := ordered[2].Entries[0].Digest, "b-2"; got != want {
+		t.Fatalf("third group starts with %q, want %q", got, want)
+	}
+
+	repeated := scheduleGroups(groups, packs)
+	for index := range ordered {
+		if ordered[index].Entries[0].Digest != repeated[index].Entries[0].Digest {
+			t.Fatalf("ordering is not deterministic: %q != %q",
+				ordered[index].Entries[0].Digest, repeated[index].Entries[0].Digest)
+		}
+	}
+}
+
 // A pack that is entirely hot, or entirely cold, is already segregated. Paying
 // to rebuild it would be pure churn.
 func TestPlanLeavesUnmixedPacksAlone(t *testing.T) {

@@ -406,6 +406,7 @@ func NewTimedPlan(layout Layout, demand *Demand, options Options, timing Timing)
 		plan.DownloadsAfter = now.downloads / float64(runs)
 	}
 	plan.Groups = append(plan.Groups, groups...)
+	plan.Groups = scheduleGroups(plan.Groups, layout.Packs)
 	sort.Strings(plan.Keep)
 	if err := plan.verify(movingEntries(append(evictOnly, reshaped...))); err != nil {
 		return Plan{}, err
@@ -509,6 +510,64 @@ func group(entries []Entry, demand *Demand, options Options) []Group {
 		groups = append(groups, groupCold(kind, cold, demand, options.TargetPackSize)...)
 	}
 	return groups
+}
+
+// scheduleGroups prioritizes groups that carry the largest share of the source
+// packs they help retire. This lets completed source packs be released earlier
+// during a partial optimization pass.
+func scheduleGroups(groups []Group, packs []Pack) []Group {
+	type scheduledGroup struct {
+		group Group
+		score float64
+	}
+
+	sourceSizes := make(map[string]int64, len(packs))
+	for _, pack := range packs {
+		size := pack.StoredSize
+		if size <= 0 {
+			size = pack.DeclaredBytes
+		}
+		if size <= 0 {
+			size = 1
+		}
+		sourceSizes[pack.ID] = size
+	}
+
+	groupSources := make([]map[string]struct{}, len(groups))
+	sourceGroupCounts := make(map[string]int)
+	for index, group := range groups {
+		groupSources[index] = make(map[string]struct{})
+		for _, entry := range group.Entries {
+			groupSources[index][entry.Pack] = struct{}{}
+		}
+		for source := range groupSources[index] {
+			sourceGroupCounts[source]++
+		}
+	}
+
+	scheduled := make([]scheduledGroup, len(groups))
+	for index, group := range groups {
+		score := float64(0)
+		sources := make([]string, 0, len(groupSources[index]))
+		for source := range groupSources[index] {
+			sources = append(sources, source)
+		}
+		sort.Strings(sources)
+		for _, source := range sources {
+			if groups := sourceGroupCounts[source]; groups > 0 {
+				score += float64(sourceSizes[source]) / float64(groups)
+			}
+		}
+		scheduled[index] = scheduledGroup{group: group, score: score}
+	}
+	sort.SliceStable(scheduled, func(i, j int) bool {
+		return scheduled[i].score > scheduled[j].score
+	})
+	ordered := make([]Group, len(scheduled))
+	for index, item := range scheduled {
+		ordered[index] = item.group
+	}
+	return ordered
 }
 
 // groupCold keeps entries that came from the same pack together, since they
