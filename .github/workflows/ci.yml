@@ -41,3 +41,28 @@ jobs:
           mv dist/SHA256SUMS "$RUNNER_TEMP/SHA256SUMS.first"
           scripts/build-dist.sh
           diff "$RUNNER_TEMP/SHA256SUMS.first" dist/SHA256SUMS
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+          cache: true
+      - name: Require Apple Silicon
+        run: test "$(uname -m)" = arm64
+      - name: Cache server Go tests with race detector
+        run: go test -race ./cmd/cache-server ./internal/server ./internal/cache ./internal/artifact
+      - name: Node cache server wrapper tests
+        run: node --test action/*.test.js
+      - name: Build packaged binaries
+        env:
+          VERSION: ci-${{ github.sha }}
+        run: scripts/build-dist.sh
+      - name: Verify packaged checksums and native server
+        env:
+          VERSION: ci-${{ github.sha }}
+        run: |
+          (cd dist && shasum -a 256 --check SHA256SUMS)
+          test "$(dist/cache-server-darwin-arm64 --version)" = "$VERSION"

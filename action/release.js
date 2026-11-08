@@ -17,14 +17,20 @@ const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 // Only names this action publishes are accepted, so a caller cannot steer the
 // download or the install path towards something else, and an argument left
 // undefined fails here rather than as a path error further down.
-function assetName(program, architecture) {
+function assetName(program, architecture, platform = "linux") {
   if (!PROGRAMS.has(program)) {
     throw new Error(`unknown program ${program}`);
   }
   if (!ARCHITECTURES.has(architecture)) {
     throw new Error(`unknown architecture ${architecture}`);
   }
-  return `${program}-linux-${architecture}`;
+  if (
+    platform !== "linux" &&
+    !(platform === "darwin" && program === "cache-server" && architecture === "arm64")
+  ) {
+    throw new Error(`unsupported platform for ${program}: ${platform}-${architecture}`);
+  }
+  return `${program}-${platform}-${architecture}`;
 }
 
 function releaseAssetUrl(repository, version, asset) {
@@ -143,6 +149,7 @@ async function resolveBinary({
   program,
   actionRoot,
   architecture,
+  platform = "linux",
   installPath,
   repository,
   ref,
@@ -158,7 +165,7 @@ async function resolveBinary({
       throw new Error(`resolveBinary needs a ${name}`);
     }
   }
-  const asset = assetName(program, architecture);
+  const asset = assetName(program, architecture, platform);
   const localBinary = path.join(actionRoot, "dist", asset);
   if (fs.existsSync(localBinary)) {
     log(`using locally built dist/${asset}`);

@@ -3,7 +3,22 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { artifactName, startupTimeoutMilliseconds } = require("./main");
+const { artifactName, serverArchitecture, startupTimeoutMilliseconds } = require("./main");
+
+test("the server supports Linux amd64/arm64 and Apple Silicon macOS", () => {
+  assert.equal(serverArchitecture("linux", "x64"), "amd64");
+  assert.equal(serverArchitecture("linux", "arm64"), "arm64");
+  assert.equal(serverArchitecture("darwin", "arm64"), "arm64");
+});
+
+test("Intel macOS and unsupported runner platforms or architectures are rejected", () => {
+  assert.throws(() => serverArchitecture("darwin", "x64"), /macOS requires Apple Silicon/);
+  assert.throws(() => serverArchitecture("darwin", "ia32"), /macOS requires Apple Silicon/);
+  assert.throws(() => serverArchitecture("linux", "riscv64"), /unsupported Linux architecture/);
+  for (const platform of ["win32", "freebsd", undefined]) {
+    assert.throws(() => serverArchitecture(platform, "arm64"), /supports Linux and Apple Silicon macOS/);
+  }
+});
 
 test("packed startup waits for its configured manifest-discovery deadline", () => {
   assert.equal(startupTimeoutMilliseconds("packs", 300), 300_000);

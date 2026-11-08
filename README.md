@@ -23,6 +23,10 @@ removes its private runner temporary directory.
 
 ## Usage
 
+The cache server supports Linux amd64/arm64 and Apple Silicon macOS runners
+(for example, `runs-on: macos-15`). Intel macOS and Windows are not supported.
+The cache optimiser remains Linux-only.
+
 ```yaml
 permissions:
   contents: read
@@ -706,18 +710,20 @@ go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 node --test action/*.test.js optimise/*.test.js
 VERSION=dev scripts/build-dist.sh
-(cd dist && sha256sum --check SHA256SUMS)
+(cd dist && shasum -a 256 --check SHA256SUMS)
 ```
 
 Release binaries are built with `CGO_ENABLED=0`, `-trimpath`, and an empty Go
 build ID, with VCS stamping disabled, for deterministic Linux amd64/arm64
-output. CI builds them twice and requires both builds to produce identical
-checksums.
+output for both programs and macOS arm64 output for the cache server only.
+CI builds them twice and requires both builds to produce identical checksums,
+and runs native cache server tests on Apple Silicon macOS.
 
 `dist/` is not tracked in Git, and neither is any other build output. Both
 actions resolve their binary in two steps:
 
-1. If `dist/<program>-linux-<arch>` exists in the checkout, it is used
+1. If `dist/<program>-<os>-<arch>` exists in the checkout (`os` is `linux` or
+   `darwin`), it is used
    directly. This is how local development, CI, and the smoke workflow exercise
    the code under review rather than a published artifact.
 2. Otherwise the binary is downloaded from the release the action itself was
@@ -738,6 +744,10 @@ repository. Only someone who can add a workflow to that repository can produce a
 passing attestation, so no checksum has to be committed alongside the action.
 
 ## Releases
+
+Both release workflows include `cache-server-darwin-arm64`, its SHA-256
+checksum in `SHA256SUMS`, and build provenance alongside the Linux binaries.
+No macOS optimiser binary is published.
 
 Release tags point at the reviewed commit itself, so the tree a consumer checks
 out is exactly the tree CI ran against. Enable
