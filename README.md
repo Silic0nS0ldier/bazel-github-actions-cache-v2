@@ -412,11 +412,11 @@ Three properties are worth knowing before enabling it:
 
 - **Nothing is deleted until its replacement is published.** An interrupted pass
   leaves duplicated storage, never a hole.
-- **Only disuse drops an entry.** A manifest records an action's closure as pack
-  IDs rather than digests, so the optimiser cannot prove a blob is unreferenced.
-  It drops only entries no job has used for `evict-after-hours`, and packs whose
-  every copy already lost the merge. A reader validates an action result's
-  outputs before serving it, so the worst an eviction can do is cause a miss.
+- **Only disuse drops an entry.** The optimiser cannot prove a blob is
+  unreferenced from manifest metadata alone. It drops only entries no job has
+  used for `evict-after-hours`, and packs whose every copy already lost the
+  merge. A reader validates an action result's outputs before serving it, so
+  the worst an eviction can do is cause a miss.
 - **A job running during the pass may lose hits, not data.** It resolved the old
   layout and will find packs gone. Scheduling the pass when the repository is
   quiet narrows that window; nothing can close it.
