@@ -166,7 +166,11 @@ func (s *Server) writeObject(
 	size int64,
 ) error {
 	s.stats.operations.Add(1)
-	file, err := os.CreateTemp(s.cfg.CacheDir, "upload-*")
+	var file *os.File
+	err := s.spoolIO.do(ctx, func() (err error) {
+		file, err = os.CreateTemp(s.cfg.CacheDir, "upload-*")
+		return err
+	})
 	if err != nil {
 		s.cfg.Logger.Printf("create upload spool for %s/%s: %v", kind, digest, err)
 		return errLocalFailure
@@ -174,16 +178,19 @@ func (s *Server) writeObject(
 	path := file.Name()
 	keep := false
 	defer func() {
-		_ = file.Close()
-		if !keep {
-			_ = os.Remove(path)
-		}
+		_ = s.spoolIO.do(context.Background(), func() error {
+			_ = file.Close()
+			if !keep {
+				_ = os.Remove(path)
+			}
+			return nil
+		})
 	}()
 
 	hasher := sha256.New()
-	writer := io.Writer(file)
+	writer := io.Writer(gatedWriter{ctx: ctx, gate: s.spoolIO, w: file})
 	if kind == "cas" {
-		writer = io.MultiWriter(file, hasher)
+		writer = io.MultiWriter(writer, hasher)
 	}
 	n, err := io.Copy(writer, io.LimitReader(body, size+1))
 	s.stats.bytesReceived.Add(uint64(n))
@@ -193,7 +200,7 @@ func (s *Server) writeObject(
 	if kind == "cas" && hex.EncodeToString(hasher.Sum(nil)) != digest {
 		return errPayloadMismatch
 	}
-	if err := file.Sync(); err != nil {
+	if err := s.spoolIO.do(ctx, file.Sync); err != nil {
 		s.cfg.Logger.Printf("sync upload spool for %s/%s: %v", kind, digest, err)
 		return errLocalFailure
 	}
