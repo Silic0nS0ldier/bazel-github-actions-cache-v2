@@ -107,6 +107,7 @@ func TestUsageReportsPackYield(t *testing.T) {
 
 	// A fresh server pays for the whole pack to read one of the two blobs.
 	restored := packed(t)
+	defer closePackedServer(t, restored)
 	if response := readCacheObject(restored, "/cas/"+hotReference.hash); response.Code != http.StatusOK {
 		t.Fatalf("CAS GET = %d", response.Code)
 	}

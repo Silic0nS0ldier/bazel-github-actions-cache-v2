@@ -329,11 +329,15 @@ func (s *Server) downloadAsset(
 		return "", digestReference{}, fmt.Errorf("create asset spool: %w", err)
 	}
 	path := file.Name()
-	defer file.Close()
 	keep := false
 	defer func() {
+		if err := file.Close(); err != nil {
+			s.cfg.Logger.Printf("close asset spool: %v", err)
+		}
 		if !keep {
-			_ = os.Remove(path)
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				s.cfg.Logger.Printf("remove asset spool: %v", err)
+			}
 		}
 	}()
 

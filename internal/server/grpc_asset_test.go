@@ -335,6 +335,7 @@ func TestAssetAliasSurvivesAPackedRoundTrip(t *testing.T) {
 		cfg.MaxManifests = 16
 		cfg.AssetClient = origin.Client()
 	})
+	defer closePackedServer(t, restored)
 	response := fetchBlob(t, restored, request)
 	if code := codes.Code(response.GetStatus().GetCode()); code != codes.OK {
 		t.Fatalf("restored fetch = %s (%s)", code, response.GetStatus().GetMessage())

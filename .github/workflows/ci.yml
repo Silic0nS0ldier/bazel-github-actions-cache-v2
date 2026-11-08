@@ -96,7 +96,12 @@ jobs:
       - name: Cache server Go tests
         env:
           RACE: ${{ matrix.race }}
-        run: go test $RACE ./cmd/cache-server ./internal/server ./internal/cache ./internal/artifact
+        run: |
+          flags=()
+          if [[ -n "$RACE" ]]; then
+            flags+=("$RACE")
+          fi
+          go test "${flags[@]}" ./cmd/cache-server ./internal/server ./internal/cache ./internal/artifact
       - name: Node cache server wrapper and lifecycle tests
         run: node --test action/*.test.js
       - name: Build packaged binaries
@@ -109,4 +114,4 @@ jobs:
           ARCHITECTURE: ${{ matrix.architecture }}
         run: |
           (cd dist && sha256sum --check SHA256SUMS)
-          test "$(dist/cache-server-windows-$ARCHITECTURE.exe --version)" = "$VERSION"
+          test "$("dist/cache-server-windows-$ARCHITECTURE.exe" --version)" = "$VERSION"
