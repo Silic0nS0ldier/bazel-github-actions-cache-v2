@@ -76,7 +76,11 @@ func (s *Server) openObject(ctx context.Context, kind, digest string) (*os.File,
 	if err != nil {
 		return nil, 0, err
 	}
-	file, err := os.Open(obj.path)
+	var file *os.File
+	err = s.fileIO.do(ctx, func() (err error) {
+		file, err = os.Open(obj.path)
+		return err
+	})
 	if err != nil {
 		s.stats.backendLoadErrors.Add(1)
 		s.cfg.Logger.Printf("open local cache object %s/%s: %v", kind, digest, err)
@@ -124,7 +128,7 @@ func (s *Server) readObjectBytes(ctx context.Context, kind, digest string) ([]by
 	}
 	defer file.Close()
 	data := make([]byte, size)
-	if _, err := io.ReadFull(file, data); err != nil {
+	if _, err := io.ReadFull(gatedReader{ctx: ctx, gate: s.fileIO, r: file}, data); err != nil {
 		s.cfg.Logger.Printf("read local cache object %s/%s: %v", kind, digest, err)
 		return nil, errLocalFailure
 	}
@@ -167,7 +171,7 @@ func (s *Server) writeObject(
 ) error {
 	s.stats.operations.Add(1)
 	var file *os.File
-	err := s.spoolIO.do(ctx, func() (err error) {
+	err := s.fileIO.do(ctx, func() (err error) {
 		file, err = os.CreateTemp(s.cfg.CacheDir, "upload-*")
 		return err
 	})
@@ -178,7 +182,7 @@ func (s *Server) writeObject(
 	path := file.Name()
 	keep := false
 	defer func() {
-		_ = s.spoolIO.do(context.Background(), func() error {
+		_ = s.fileIO.do(context.Background(), func() error {
 			_ = file.Close()
 			if !keep {
 				_ = os.Remove(path)
@@ -188,7 +192,7 @@ func (s *Server) writeObject(
 	}()
 
 	hasher := sha256.New()
-	writer := io.Writer(gatedWriter{ctx: ctx, gate: s.spoolIO, w: file})
+	writer := io.Writer(gatedWriter{ctx: ctx, gate: s.fileIO, w: file})
 	if kind == "cas" {
 		writer = io.MultiWriter(writer, hasher)
 	}
@@ -200,7 +204,7 @@ func (s *Server) writeObject(
 	if kind == "cas" && hex.EncodeToString(hasher.Sum(nil)) != digest {
 		return errPayloadMismatch
 	}
-	if err := s.spoolIO.do(ctx, file.Sync); err != nil {
+	if err := s.fileIO.do(ctx, file.Sync); err != nil {
 		s.cfg.Logger.Printf("sync upload spool for %s/%s: %v", kind, digest, err)
 		return errLocalFailure
 	}
