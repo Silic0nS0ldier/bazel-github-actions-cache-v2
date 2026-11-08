@@ -6,17 +6,17 @@ import (
 	"sync/atomic"
 )
 
-// maxConcurrentSpoolIO bounds the spool filesystem calls in flight at once.
-// Every blocking file syscall pins an OS thread, and Bazel fans uploads out to
-// roughly 10k concurrent streams (100 connections of 100 streams each). Left
-// unbounded, a large upload burst on a slow runner disk exceeds the Go
-// runtime's 10k-thread limit and aborts the process with "fatal error: thread
-// exhaustion". A goroutine queued on the gate holds no thread.
-const maxConcurrentSpoolIO = 64
+// maxConcurrentFileIO bounds the request-driven filesystem calls in flight at
+// once. Every blocking file syscall pins an OS thread, and Bazel fans uploads
+// and downloads out to roughly 10k concurrent streams (100 connections of 100
+// streams each). Left unbounded, a large burst on a slow runner disk exceeds the
+// Go runtime's 10k-thread limit and aborts the process with "fatal error:
+// thread exhaustion". A goroutine queued on the gate holds no thread.
+const maxConcurrentFileIO = 64
 
 // ioGate admits a bounded number of blocking filesystem calls. Slots are held
-// only for the duration of each call, never across network reads, so a slow
-// client cannot starve other uploads.
+// only for the duration of each call, never across network I/O, so a slow
+// client cannot starve other requests.
 type ioGate struct {
 	slots  chan struct{}
 	active atomic.Int64
@@ -70,4 +70,19 @@ func (w gatedWriter) Write(p []byte) (int, error) {
 	}
 	defer w.gate.exit()
 	return w.w.Write(p)
+}
+
+// gatedReader holds a gate slot for each read from the underlying file.
+type gatedReader struct {
+	ctx  context.Context
+	gate *ioGate
+	r    io.Reader
+}
+
+func (r gatedReader) Read(p []byte) (int, error) {
+	if err := r.gate.enter(r.ctx); err != nil {
+		return 0, err
+	}
+	defer r.gate.exit()
+	return r.r.Read(p)
 }

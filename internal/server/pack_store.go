@@ -48,7 +48,7 @@ type packStore struct {
 	pendingActions  map[string]pendingAction
 	pendingACOrder  []string
 	pendingBytes    int64
-	loadedPacks     map[string]string
+	loadedPacks     map[string]loadedPack
 	loadingPacks    map[string]*packLoad
 	listedPacks     map[string]struct{}
 	packsListed     bool
@@ -71,8 +71,16 @@ type pendingAction struct {
 
 type packLoad struct {
 	done chan struct{}
-	path string
+	pack loadedPack
 	err  error
+}
+
+// loadedPack is a restored pack with one reader shared by every lookup.
+// Reopening a pack indexes the whole archive, which made each packed read cost
+// a full scan of its pack.
+type loadedPack struct {
+	path  string
+	store *blockstore.ReadOnly
 }
 
 // errPackUnavailable marks a permanent answer about an immutable pack key:
@@ -105,7 +113,7 @@ func newPackStore(server *Server) (*packStore, error) {
 		heads:           make(map[string]struct{}),
 		pendingCAS:      make(map[string]object),
 		pendingActions:  make(map[string]pendingAction),
-		loadedPacks:     make(map[string]string),
+		loadedPacks:     make(map[string]loadedPack),
 		loadingPacks:    make(map[string]*packLoad),
 		listedPacks:     make(map[string]struct{}),
 		missingPacks:    make(map[string]struct{}),
@@ -158,6 +166,11 @@ func (p *packStore) close(ctx context.Context) error {
 	err := p.flush(ctx, true)
 	p.renewPending(ctx)
 	p.codec.close()
+	p.mu.Lock()
+	for _, pack := range p.loadedPacks {
+		_ = pack.store.Close()
+	}
+	p.mu.Unlock()
 	return err
 }
 
@@ -241,14 +254,14 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 	}
 	p.mu.Unlock()
 
-	path, err := p.loadPack(ctx, packID)
+	pack, err := p.loadPack(ctx, packID)
 	if err != nil {
 		if errors.Is(err, errPackUnavailable) {
 			return object{}, false, nil
 		}
 		return object{}, false, err
 	}
-	stored, err := readCARBlock(ctx, path, blockCID, p.server.cfg.MaxBlobSize)
+	stored, err := blockFromStore(ctx, pack.store, blockCID)
 	if err != nil {
 		return object{}, false, err
 	}
@@ -274,7 +287,7 @@ func (p *packStore) resolve(ctx context.Context, key, kind, digest string) (obje
 			return object{}, false, fmt.Errorf("packed CAS integrity check failed for %s", digest)
 		}
 	}
-	value, err = p.materialize(key, data)
+	value, err = p.materialize(ctx, key, data)
 	if err != nil {
 		return object{}, false, err
 	}
@@ -412,29 +425,18 @@ func (p *packStore) renewPending(ctx context.Context) {
 	}
 }
 
-func (p *packStore) materialize(key string, data []byte) (object, error) {
+func (p *packStore) materialize(ctx context.Context, key string, data []byte) (object, error) {
 	p.server.objectsMu.RLock()
 	existing, exists := p.server.objects[key]
 	p.server.objectsMu.RUnlock()
 	if exists {
 		return existing, nil
 	}
-	file, err := os.CreateTemp(p.server.cfg.CacheDir, "packed-object-*")
-	if err != nil {
-		return object{}, err
-	}
-	path := file.Name()
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return object{}, err
-	}
-	_, err = file.Write(data)
-	if err == nil {
-		err = file.Sync()
-	}
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
+	var path string
+	err := p.server.fileIO.do(ctx, func() (err error) {
+		path, err = writePrivateTemp(p.server.cfg.CacheDir, "packed-object-*", data)
+		return err
+	})
 	if err != nil {
 		return object{}, err
 	}
@@ -442,6 +444,8 @@ func (p *packStore) materialize(key string, data []byte) (object, error) {
 	p.server.objectsMu.Lock()
 	if existing, exists := p.server.objects[key]; exists {
 		p.server.objectsMu.Unlock()
+		// A concurrent read materialized the object first.
+		_ = p.server.fileIO.do(context.Background(), func() error { return os.Remove(path) })
 		return existing, nil
 	}
 	p.server.objects[key] = value
@@ -449,31 +453,31 @@ func (p *packStore) materialize(key string, data []byte) (object, error) {
 	return value, nil
 }
 
-func (p *packStore) loadPack(ctx context.Context, packID string) (string, error) {
+func (p *packStore) loadPack(ctx context.Context, packID string) (loadedPack, error) {
 	p.mu.Lock()
-	if path, exists := p.loadedPacks[packID]; exists {
+	if pack, exists := p.loadedPacks[packID]; exists {
 		p.mu.Unlock()
-		return path, nil
+		return pack, nil
 	}
 	if loading, exists := p.loadingPacks[packID]; exists {
 		done := loading.done
 		p.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return loadedPack{}, ctx.Err()
 		case <-done:
-			return loading.path, loading.err
+			return loading.pack, loading.err
 		}
 	}
 	descriptor, exists := p.packs[packID]
 	if !exists {
 		p.mu.Unlock()
-		return "", fmt.Errorf("manifest references unknown pack %s: %w", packID, errPackUnavailable)
+		return loadedPack{}, fmt.Errorf("manifest references unknown pack %s: %w", packID, errPackUnavailable)
 	}
 	if _, unavailable := p.missingPacks[packID]; unavailable {
 		p.mu.Unlock()
 		p.server.stats.packLoadsSkipped.Add(1)
-		return "", fmt.Errorf("pack %s is not restorable in this job: %w", packID, errPackUnavailable)
+		return loadedPack{}, fmt.Errorf("pack %s is not restorable in this job: %w", packID, errPackUnavailable)
 	}
 	// The catalog lists every ref, so a pack absent from it is definitely gone.
 	// A listed pack may still be out of this job's cache scope, which only a
@@ -483,17 +487,17 @@ func (p *packStore) loadPack(ctx context.Context, packID string) (string, error)
 		p.mu.Unlock()
 		p.server.stats.packLoadsSkipped.Add(1)
 		p.server.cfg.Logger.Printf("pack %s is absent from the cache listing; its entries are cache misses", packID)
-		return "", fmt.Errorf("pack %s is not restorable in this job: %w", packID, errPackUnavailable)
+		return loadedPack{}, fmt.Errorf("pack %s is not restorable in this job: %w", packID, errPackUnavailable)
 	}
 	loading := &packLoad{done: make(chan struct{})}
 	p.loadingPacks[packID] = loading
 	p.mu.Unlock()
 
-	path, err := p.downloadPack(ctx, descriptor)
+	pack, err := p.downloadPack(ctx, descriptor)
 	p.mu.Lock()
 	if err == nil {
-		p.loadedPacks[packID] = path
-		loading.path = path
+		p.loadedPacks[packID] = pack
+		loading.pack = pack
 		// The download already reset this entry's retention.
 		p.renewedPacks[packID] = struct{}{}
 		delete(p.pendingRenewals, packID)
@@ -506,17 +510,17 @@ func (p *packStore) loadPack(ctx context.Context, packID string) (string, error)
 	delete(p.loadingPacks, packID)
 	close(loading.done)
 	p.mu.Unlock()
-	return path, err
+	return pack, err
 }
 
-func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor) (string, error) {
+func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor) (loadedPack, error) {
 	if err := p.server.acquire(ctx); err != nil {
-		return "", err
+		return loadedPack{}, err
 	}
 	defer p.server.release()
 	file, err := os.CreateTemp(p.server.cfg.CacheDir, "pack-download-*")
 	if err != nil {
-		return "", err
+		return loadedPack{}, err
 	}
 	path := file.Name()
 	limited := &maxWriter{writer: file, remaining: p.server.cfg.MaxBlobSize}
@@ -527,37 +531,43 @@ func (p *packStore) downloadPack(ctx context.Context, descriptor packDescriptor)
 		err = closeErr
 	}
 	if err != nil {
-		return "", err
+		return loadedPack{}, err
 	}
 	if !found {
-		return "", fmt.Errorf("pack %s is missing: %w", descriptor.ID, errPackUnavailable)
+		return loadedPack{}, fmt.Errorf("pack %s is missing: %w", descriptor.ID, errPackUnavailable)
 	}
 	p.server.stats.backendDownloads.Add(1)
 	p.server.stats.packDownloads.Add(1)
 	p.server.usage.packRestored(descriptor.ID, descriptor.Size, p.declaredBytesFor(descriptor.ID))
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", err
+		return loadedPack{}, err
 	}
 	if info.Size() != descriptor.Size {
-		return "", fmt.Errorf("pack %s has size %d; manifest declares %d: %w", descriptor.ID, info.Size(), descriptor.Size, errPackUnavailable)
+		return loadedPack{}, fmt.Errorf("pack %s has size %d; manifest declares %d: %w", descriptor.ID, info.Size(), descriptor.Size, errPackUnavailable)
 	}
 	verify, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return loadedPack{}, err
 	}
 	actual, hashErr := hashFile(verify)
 	closeErr := verify.Close()
 	if hashErr != nil {
-		return "", hashErr
+		return loadedPack{}, hashErr
 	}
 	if closeErr != nil {
-		return "", closeErr
+		return loadedPack{}, closeErr
 	}
 	if actual != descriptor.ID {
-		return "", fmt.Errorf("pack integrity check failed: expected %s, got %s: %w", descriptor.ID, actual, errPackUnavailable)
+		return loadedPack{}, fmt.Errorf("pack integrity check failed: expected %s, got %s: %w", descriptor.ID, actual, errPackUnavailable)
 	}
-	return path, nil
+	// The bytes match the pack's content ID, so an archive that cannot be
+	// opened will never open and its entries are permanent misses.
+	store, err := openPackReader(path, p.server.cfg.MaxBlobSize)
+	if err != nil {
+		return loadedPack{}, fmt.Errorf("pack %s cannot be read: %w: %w", descriptor.ID, err, errPackUnavailable)
+	}
+	return loadedPack{path: path, store: store}, nil
 }
 
 func (p *packStore) flush(ctx context.Context, all bool) error {
@@ -1179,15 +1189,6 @@ func blockFromStore(ctx context.Context, store *blockstore.ReadOnly, contentCID 
 		return nil, errors.New("CARv2 block CID integrity check failed")
 	}
 	return data, nil
-}
-
-func readCARBlock(ctx context.Context, path, contentCID string, maxBlobSize int64) ([]byte, error) {
-	store, err := openPackReader(path, maxBlobSize)
-	if err != nil {
-		return nil, err
-	}
-	defer store.Close()
-	return blockFromStore(ctx, store, contentCID)
 }
 
 func writePrivateTemp(directory, pattern string, data []byte) (string, error) {

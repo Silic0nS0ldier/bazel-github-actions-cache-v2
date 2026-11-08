@@ -651,7 +651,7 @@ not a source of truth.
 The server binds only to `127.0.0.1` on a dynamic port. Its shutdown token is
 random, masked, stored only as action post-state, and never exposed as a normal
 output. The GitHub runtime token is inherited by the Go process but never
-logged. Uploads are bounded on disk, spool filesystem calls and backend
+logged. Uploads are bounded on disk, request filesystem calls and backend
 concurrency are limited, and CAS content is verified in both directions.
 
 Code running in the same job can still reach loopback, inspect its own runner

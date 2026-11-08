@@ -88,7 +88,7 @@ type Server struct {
 	published      map[string]struct{}
 	publishing     map[string]*publication
 	sem            chan struct{}
-	spoolIO        *ioGate
+	fileIO         *ioGate
 	limiter        *intervalLimiter
 	packs          *packStore
 	usage          *usageRecorder
@@ -165,7 +165,7 @@ func New(cfg Config) (*Server, error) {
 		published:   make(map[string]struct{}),
 		publishing:  make(map[string]*publication),
 		sem:         make(chan struct{}, cfg.MaxConcurrent),
-		spoolIO:     newIOGate(maxConcurrentSpoolIO),
+		fileIO:      newIOGate(maxConcurrentFileIO),
 		limiter:     newIntervalLimiter(cfg.UploadsPerMinute),
 		usage:       newUsageRecorder(),
 		assetRoutes: assetRoutes,
