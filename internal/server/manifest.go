@@ -33,6 +33,22 @@ type manifest struct {
 	Actions []manifestAction
 }
 
+func manifestHeads(manifests map[string]manifest) map[string]struct{} {
+	parents := make(map[string]struct{})
+	for _, value := range manifests {
+		for _, parent := range value.Parents {
+			parents[parent] = struct{}{}
+		}
+	}
+	heads := make(map[string]struct{}, len(manifests))
+	for id := range manifests {
+		if _, isParent := parents[id]; !isParent {
+			heads[id] = struct{}{}
+		}
+	}
+	return heads
+}
+
 // Since, when set, is when the pack's contents took their current shape, in
 // Unix seconds. A pack rewritten only to drop stale entries keeps its source's
 // value, so dropping entries never makes a pack look newly shaped. Readers

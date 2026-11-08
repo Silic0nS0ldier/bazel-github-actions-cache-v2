@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +41,43 @@ func seedPacked(t *testing.T, backend *memoryBackend, blobs ...[]byte) {
 		}
 	}
 	closePackedServer(t, writer)
+}
+
+func addChildManifestSortingBeforeParent(t *testing.T, backend *memoryBackend) (string, string) {
+	t.Helper()
+	layout := readLayout(t, backend)
+	if len(layout.Manifests) != 1 {
+		t.Fatalf("seed manifests = %d, want 1", len(layout.Manifests))
+	}
+	parentReference := layout.Manifests[0]
+	backend.mu.Lock()
+	parentData := bytes.Clone(backend.objects[parentReference.Key])
+	backend.mu.Unlock()
+	parent, err := decodeManifest(parentData, parentReference.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for since := int64(1); since <= 10_000; since++ {
+		child := parent
+		child.Parents = []string{parentReference.ID}
+		child.Packs = append([]packDescriptor(nil), parent.Packs...)
+		child.Packs[0].Since = since
+		data, id, err := encodeManifest(child)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id >= parentReference.ID {
+			continue
+		}
+		key := manifestKeyFor("test-v1", child.Packs[0].ID, id)
+		backend.mu.Lock()
+		backend.objects[key] = bytes.Clone(data)
+		backend.mu.Unlock()
+		return parentReference.ID, id
+	}
+	t.Fatal("could not construct a child manifest that sorts before its parent")
+	return "", ""
 }
 
 // dropOriginals removes everything the layout was read from. Packs are content
@@ -81,6 +120,63 @@ func TestReadLayoutMatchesWhatAServerResolves(t *testing.T) {
 		if got := reader.packFor(entry.Kind, entry.Digest); got != entry.Pack {
 			t.Fatalf("layout puts %s in %s, the server reads it from %s", entry.Digest, entry.Pack, got)
 		}
+	}
+}
+
+func TestManifestHeadsAreIndependentOfCIDOrdering(t *testing.T) {
+	backend := newMemoryBackend()
+	seedPacked(t, backend, []byte("parent manifest output"))
+	parentID, childID := addChildManifestSortingBeforeParent(t, backend)
+	if childID >= parentID {
+		t.Fatalf("child ID %s does not sort before parent ID %s", childID, parentID)
+	}
+
+	layout := readLayout(t, backend)
+	if len(layout.Heads) != 1 || layout.Heads[0] != childID {
+		t.Fatalf("layout heads = %v, want only child %s", layout.Heads, childID)
+	}
+
+	writer := testPackedServer(t, backend)
+	writer.packs.mu.Lock()
+	var discoveredHeads []string
+	for head := range writer.packs.heads {
+		discoveredHeads = append(discoveredHeads, head)
+	}
+	writer.packs.mu.Unlock()
+	sort.Strings(discoveredHeads)
+	if len(discoveredHeads) != 1 || discoveredHeads[0] != childID {
+		t.Fatalf("discovered heads = %v, want only child %s", discoveredHeads, childID)
+	}
+
+	next := []byte("next manifest output")
+	if response := putCacheObject(writer, "/cas/"+digest(next), next); response.Code != http.StatusNoContent {
+		t.Fatalf("next CAS PUT = %d", response.Code)
+	}
+	closePackedServer(t, writer)
+
+	backend.mu.Lock()
+	var committed manifest
+	foundCommitted := false
+	for key, data := range backend.objects {
+		_, id, ok := parseManifestKey("test-v1", key)
+		if !ok || id == parentID || id == childID {
+			continue
+		}
+		value, decodeErr := decodeManifest(data, id)
+		if decodeErr != nil {
+			backend.mu.Unlock()
+			t.Fatal(decodeErr)
+		}
+		committed = value
+		foundCommitted = true
+		break
+	}
+	backend.mu.Unlock()
+	if !foundCommitted {
+		t.Fatal("close did not publish a new manifest")
+	}
+	if len(committed.Parents) != 1 || committed.Parents[0] != childID {
+		t.Fatalf("new manifest parents = %v, want only child %s", committed.Parents, childID)
 	}
 }
 
