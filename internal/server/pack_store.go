@@ -1247,15 +1247,8 @@ func writePrivateTemp(directory, pattern string, data []byte) (string, error) {
 		return "", err
 	}
 	path := file.Name()
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return "", err
-	}
 	if len(data) > 0 {
 		_, err = file.Write(data)
-	}
-	if err == nil {
-		err = file.Sync()
 	}
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
