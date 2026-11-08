@@ -35,6 +35,7 @@ runs:
         subject-path: |
           dist/cache-optimiser-linux-amd64
           dist/cache-optimiser-linux-arm64
+          dist/cache-server-darwin-arm64
           dist/cache-server-linux-amd64
           dist/cache-server-linux-arm64
 
@@ -71,6 +72,7 @@ runs:
         gh release upload "$VERSION" \
           dist/cache-optimiser-linux-amd64 \
           dist/cache-optimiser-linux-arm64 \
+          dist/cache-server-darwin-arm64 \
           dist/cache-server-linux-amd64 \
           dist/cache-server-linux-arm64 \
           dist/SHA256SUMS

@@ -52,20 +52,27 @@ function portNumber(name) {
   return value;
 }
 
-async function main() {
-  if (process.platform !== "linux") {
-    throw new Error("this release supports Linux GitHub Actions runners only");
+function serverArchitecture(platform, arch) {
+  if (platform !== "linux" && platform !== "darwin") {
+    throw new Error("this release supports Linux and Apple Silicon macOS GitHub Actions runners only");
   }
+  if (platform === "darwin" && arch !== "arm64") {
+    throw new Error(`macOS requires Apple Silicon (arm64); unsupported architecture: ${arch}`);
+  }
+  const architecture = { x64: "amd64", arm64: "arm64" }[arch];
+  if (!architecture) {
+    throw new Error(`unsupported Linux architecture: ${arch}`);
+  }
+  return architecture;
+}
+
+async function main() {
+  const architecture = serverArchitecture(process.platform, process.arch);
   if (process.env.ACTIONS_CACHE_SERVICE_V2?.toLowerCase() !== "true") {
     throw new Error("GitHub Actions cache v2 is unavailable (ACTIONS_CACHE_SERVICE_V2 != true)");
   }
   if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {
     throw new Error("GitHub Actions cache v2 credentials are unavailable in this step");
-  }
-
-  const architecture = { x64: "amd64", arm64: "arm64" }[process.arch];
-  if (!architecture) {
-    throw new Error(`unsupported Linux architecture: ${process.arch}`);
   }
 
   const writeEnabled = resolveWriteMode(input("write", "auto"));
@@ -118,6 +125,7 @@ async function main() {
     program: "cache-server",
     actionRoot: path.resolve(__dirname, ".."),
     architecture,
+    platform: process.platform,
     // Installing under a fixed name keeps every part of the spawned path a
     // constant, so no release name can influence which program runs.
     installPath: path.join(tempDir, "cache-server"),
@@ -239,4 +247,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { artifactName, startupTimeoutMilliseconds };
+module.exports = { artifactName, serverArchitecture, startupTimeoutMilliseconds };

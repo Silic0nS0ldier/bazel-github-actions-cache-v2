@@ -25,7 +25,10 @@ concurrency:
 
 jobs:
   smoke:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -50,7 +53,7 @@ jobs:
         shell: bash
         run: |
           printf '%s' 'bazel-github-actions-cache-v2-smoke-v0.2.0' > "$RUNNER_TEMP/cache-object"
-          digest=$(sha256sum "$RUNNER_TEMP/cache-object" | cut -d' ' -f1)
+          digest=$(shasum -a 256 "$RUNNER_TEMP/cache-object" | cut -d' ' -f1)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Seed cache
         if: github.event_name == 'push' || inputs.mode == 'seed'

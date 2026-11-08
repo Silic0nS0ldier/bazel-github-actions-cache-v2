@@ -67,6 +67,23 @@ test("release assets are addressed by tag, not by latest", () => {
     releaseAssetUrl(REPOSITORY, "v1.2.3", assetName("cache-optimiser", "amd64")),
     "https://github.com/cre4ture/bazel-github-actions-cache-v2/releases/download/v1.2.3/cache-optimiser-linux-amd64",
   );
+  assert.strictEqual(
+    releaseAssetUrl(REPOSITORY, "pre-20261108T120614Z", assetName("cache-server", "arm64", "darwin")),
+    "https://github.com/cre4ture/bazel-github-actions-cache-v2/releases/download/pre-20261108T120614Z/cache-server-darwin-arm64",
+  );
+});
+
+test("only the server is published for macOS, and only for Apple Silicon", () => {
+  assert.throws(() => assetName("cache-server", "amd64", "darwin"), /unsupported platform/);
+  for (const architecture of ["amd64", "arm64"]) {
+    assert.throws(() => assetName("cache-optimiser", architecture, "darwin"), /unsupported platform/);
+    for (const program of ["cache-server", "cache-optimiser"]) {
+      assert.equal(assetName(program, architecture, "linux"), `${program}-linux-${architecture}`);
+    }
+  }
+  for (const platform of ["win32", "freebsd", "../linux", ""]) {
+    assert.throws(() => assetName("cache-server", "arm64", platform), /unsupported platform/);
+  }
 });
 
 // The program name reaches a download URL and an install path, so only names
@@ -198,6 +215,51 @@ test("a locally built binary is preferred over any published release", async (t)
   );
 });
 
+test("macOS resolves its local server binary rather than a Linux ARM64 binary", async (t) => {
+  const root = workspace(t);
+  const actionRoot = path.join(root, "checkout");
+  const dist = path.join(actionRoot, "dist");
+  fs.mkdirSync(dist, { recursive: true });
+  fs.writeFileSync(path.join(dist, assetName("cache-server", "arm64", "linux")), "Linux server");
+  const local = path.join(dist, assetName("cache-server", "arm64", "darwin"));
+  fs.writeFileSync(local, "macOS server");
+  stubFetch(t, () => {
+    throw new Error("a local binary must not require a release download");
+  });
+
+  assert.strictEqual(
+    await resolve({ actionRoot, platform: "darwin", architecture: "arm64", repository: undefined }),
+    local,
+  );
+});
+
+test("Linux and macOS ARM64 server binaries do not collide in the tool cache", async (t) => {
+  const root = workspace(t);
+  const toolCacheRoot = path.join(root, "tools");
+  const cacheDir = path.join(toolCacheRoot, "bazel-gha-cache-server", "v1.2.3", "arm64");
+  fs.mkdirSync(cacheDir, { recursive: true });
+  for (const platform of ["linux", "darwin"]) {
+    fs.writeFileSync(path.join(cacheDir, assetName("cache-server", "arm64", platform)), platform);
+  }
+  stubFetch(t, () => {
+    throw new Error("a cached binary must not require a release download");
+  });
+
+  for (const platform of ["linux", "darwin"]) {
+    const installPath = path.join(root, "cache-server");
+    const resolved = await resolve({
+      actionRoot: path.join(root, "checkout"),
+      architecture: "arm64",
+      platform,
+      installPath,
+      toolCacheRoot,
+    });
+    assert.strictEqual(resolved, installPath);
+    assert.strictEqual(fs.readFileSync(resolved, "utf8"), platform);
+    assert.strictEqual(fs.statSync(resolved).mode & 0o777, 0o700);
+  }
+});
+
 test("an action running from an unknown repository will not guess where to download", async (t) => {
   const root = workspace(t);
   await assert.rejects(
@@ -250,35 +312,48 @@ test("a download that lands on plain HTTP is refused before the body is read", a
   assert.ok(served, "the endpoint should have been reached and then rejected");
 });
 
-test("a binary whose provenance cannot be verified is discarded", async (t) => {
-  const root = workspace(t);
-  const toolCacheRoot = path.join(root, "tools");
-  const address = await localServer(t, (_, response) => {
-    response.writeHead(200).end("an unattested binary");
-  });
-  // Serve the asset locally while reporting the HTTPS origin the download
-  // requires, so that verification rather than transport is what fails.
-  stubFetch(t, async (url) => {
-    const served = await realFetch(String(url).replace(/^https:\/\/github\.com/, `http://${address}`));
-    return { ok: true, url: "https://github.com/", arrayBuffer: () => served.arrayBuffer() };
-  });
-  // Hide the GitHub CLI so verification fails locally instead of reaching out.
-  const realPath = process.env.PATH;
-  process.env.PATH = path.join(root, "empty");
-  t.after(() => {
-    process.env.PATH = realPath;
-  });
+for (const platform of ["linux", "darwin"]) {
+  test(`a ${platform} binary whose provenance cannot be verified is discarded`, async (t) => {
+    const root = workspace(t);
+    const toolCacheRoot = path.join(root, "tools");
+    const actionRoot = path.join(root, "checkout");
+    if (platform === "darwin") {
+      fs.mkdirSync(path.join(actionRoot, "dist"), { recursive: true });
+      fs.writeFileSync(path.join(actionRoot, "dist", assetName("cache-server", "arm64")), "Linux server");
+    }
+    const address = await localServer(t, (_, response) => {
+      response.writeHead(200).end("an unattested binary");
+    });
+    // Serve the asset locally while reporting the HTTPS origin the download
+    // requires, so that verification rather than transport is what fails.
+    stubFetch(t, async (url) => {
+      assert.strictEqual(
+        url,
+        releaseAssetUrl(REPOSITORY, "v1.2.3", assetName("cache-server", "arm64", platform)),
+      );
+      const served = await realFetch(String(url).replace(/^https:\/\/github\.com/, `http://${address}`));
+      return { ok: true, url: "https://github.com/", arrayBuffer: () => served.arrayBuffer() };
+    });
+    // Hide the GitHub CLI so verification fails locally instead of reaching out.
+    const realPath = process.env.PATH;
+    process.env.PATH = path.join(root, "empty");
+    t.after(() => {
+      process.env.PATH = realPath;
+    });
 
-  await assert.rejects(
-    resolve({
-      actionRoot: path.join(root, "checkout"),
-      installPath: path.join(root, "cache-server"),
-      toolCacheRoot,
-    }),
-    /provenance|GitHub CLI/,
-  );
-  const cacheDir = path.join(toolCacheRoot, "bazel-gha-cache-server", "v1.2.3", "amd64");
-  const leftovers = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : [];
-  assert.deepStrictEqual(leftovers, [], "an unverified download must not be left behind");
-  assert.ok(!fs.existsSync(path.join(root, "cache-server")), "nothing must be installed");
-});
+    await assert.rejects(
+      resolve({
+        actionRoot,
+        architecture: "arm64",
+        platform,
+        installPath: path.join(root, "cache-server"),
+        toolCacheRoot,
+      }),
+      /provenance|GitHub CLI/,
+    );
+    const cacheDir = path.join(toolCacheRoot, "bazel-gha-cache-server", "v1.2.3", "arm64");
+    const leftovers = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : [];
+    assert.deepStrictEqual(leftovers, [], "an unverified download must not be left behind");
+    assert.ok(!fs.existsSync(path.join(root, "cache-server")), "nothing must be installed");
+  });
+}
