@@ -26,11 +26,13 @@ function assetName(program, architecture, platform = "linux") {
   }
   if (
     platform !== "linux" &&
-    !(platform === "darwin" && program === "cache-server" && architecture === "arm64")
+    !(platform === "darwin" && program === "cache-server" && architecture === "arm64") &&
+    !(platform === "win32" && program === "cache-server")
   ) {
     throw new Error(`unsupported platform for ${program}: ${platform}-${architecture}`);
   }
-  return `${program}-${platform}-${architecture}`;
+  const os = platform === "win32" ? "windows" : platform;
+  return `${program}-${os}-${architecture}${platform === "win32" ? ".exe" : ""}`;
 }
 
 function releaseAssetUrl(repository, version, asset) {
@@ -138,7 +140,9 @@ function install(source, destination) {
   } catch {
     fs.copyFileSync(source, destination);
   }
-  fs.chmodSync(destination, 0o700);
+  if (process.platform !== "win32") {
+    fs.chmodSync(destination, 0o700);
+  }
   return destination;
 }
 

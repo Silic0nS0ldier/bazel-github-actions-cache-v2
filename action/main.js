@@ -53,21 +53,28 @@ function portNumber(name) {
 }
 
 function serverArchitecture(platform, arch) {
-  if (platform !== "linux" && platform !== "darwin") {
-    throw new Error("this release supports Linux and Apple Silicon macOS GitHub Actions runners only");
+  if (!["linux", "darwin", "win32"].includes(platform)) {
+    throw new Error("this release supports Linux, Apple Silicon macOS, and Windows GitHub Actions runners only");
   }
   if (platform === "darwin" && arch !== "arm64") {
     throw new Error(`macOS requires Apple Silicon (arm64); unsupported architecture: ${arch}`);
   }
   const architecture = { x64: "amd64", arm64: "arm64" }[arch];
   if (!architecture) {
-    throw new Error(`unsupported Linux architecture: ${arch}`);
+    throw new Error(`unsupported ${platform === "win32" ? "Windows" : "Linux"} architecture: ${arch}`);
   }
   return architecture;
 }
 
 async function main() {
-  const architecture = serverArchitecture(process.platform, process.arch);
+  // An ARM64 Windows runner may execute the action's Node runtime under x64
+  // emulation. Select the native server from the runner's architecture.
+  const architecture = serverArchitecture(
+    process.platform,
+    process.platform === "win32" && process.env.RUNNER_ARCH
+      ? process.env.RUNNER_ARCH.toLowerCase()
+      : process.arch,
+  );
   if (process.env.ACTIONS_CACHE_SERVICE_V2?.toLowerCase() !== "true") {
     throw new Error("GitHub Actions cache v2 is unavailable (ACTIONS_CACHE_SERVICE_V2 != true)");
   }
@@ -114,6 +121,7 @@ async function main() {
   const tempDir = safeTemporaryDirectory(
     fs.mkdtempSync(path.join(path.resolve(process.env.RUNNER_TEMP), "bazel-gha-cache-v2-")),
   );
+  saveState("temp_dir", tempDir);
   const readyFile = path.join(tempDir, "ready.json");
   const statsFile = path.join(tempDir, "stats.json");
   const logFile = path.join(tempDir, "server.log");
@@ -128,7 +136,7 @@ async function main() {
     platform: process.platform,
     // Installing under a fixed name keeps every part of the spawned path a
     // constant, so no release name can influence which program runs.
-    installPath: path.join(tempDir, "cache-server"),
+    installPath: path.join(tempDir, process.platform === "win32" ? "cache-server.exe" : "cache-server"),
     repository: process.env.GITHUB_ACTION_REPOSITORY,
     ref: process.env.GITHUB_ACTION_REF,
     token: githubToken || process.env.GITHUB_TOKEN || "",
@@ -185,6 +193,7 @@ async function main() {
   const logDescriptor = fs.openSync(logFile, "a", 0o600);
   const child = spawn(binary, args, {
     detached: true,
+    windowsHide: true,
     env: {
       ...process.env,
       BAZEL_GHA_CACHE_SHUTDOWN_TOKEN: shutdownToken,
@@ -193,7 +202,15 @@ async function main() {
     stdio: ["ignore", logDescriptor, logDescriptor],
   });
   fs.closeSync(logDescriptor);
+  await new Promise((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
   child.unref();
+  saveState("pid", String(child.pid));
+  saveState("shutdown_token", shutdownToken);
+  saveState("stats_file", statsFile);
+  saveState("shutdown_wait_seconds", String(Math.max(60, backendTimeoutSeconds + 30)));
 
   const readyDeadline = Date.now() + startupTimeoutMilliseconds(storageMode, backendTimeoutSeconds);
   let ready;
@@ -217,11 +234,6 @@ async function main() {
   }
 
   saveState("url", ready.url);
-  saveState("pid", String(ready.pid));
-  saveState("shutdown_token", shutdownToken);
-  saveState("stats_file", statsFile);
-  saveState("temp_dir", tempDir);
-  saveState("shutdown_wait_seconds", String(Math.max(60, backendTimeoutSeconds + 30)));
   setOutput("url", ready.url);
   setOutput("grpc-url", ready.grpc_url);
   setOutput("stats-url", ready.stats_url);

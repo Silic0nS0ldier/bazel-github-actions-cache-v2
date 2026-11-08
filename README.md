@@ -23,9 +23,16 @@ removes its private runner temporary directory.
 
 ## Usage
 
-The cache server supports Linux amd64/arm64 and Apple Silicon macOS runners
-(for example, `runs-on: macos-15`). Intel macOS and Windows are not supported.
+The cache server supports Linux amd64/arm64, Apple Silicon macOS runners
+(for example, `runs-on: macos-15`), and Windows x64/ARM64 runners
+(`windows-2025` and `windows-11-arm`). Intel macOS and 32-bit Windows are not supported.
 The cache optimiser remains Linux-only.
+
+On Windows the action selects the native server using `RUNNER_ARCH`, even if
+the action's Node runtime runs under x64 emulation on an ARM64 runner. Shutdown
+uses the same authenticated HTTP endpoint on every platform; forced termination
+is a last resort and cannot flush pending uploads. Private files inherit the
+runner temporary directory's Windows ACLs rather than Unix permission bits.
 
 ```yaml
 permissions:
@@ -715,15 +722,19 @@ VERSION=dev scripts/build-dist.sh
 
 Release binaries are built with `CGO_ENABLED=0`, `-trimpath`, and an empty Go
 build ID, with VCS stamping disabled, for deterministic Linux amd64/arm64
-output for both programs and macOS arm64 output for the cache server only.
+output for both programs, plus macOS arm64 and Windows amd64/arm64 output for
+the cache server only.
 CI builds them twice and requires both builds to produce identical checksums,
-and runs native cache server tests on Apple Silicon macOS.
+and runs native cache server tests on Apple Silicon macOS and both Windows
+architectures. Windows ARM64 Go tests run without the unsupported race detector.
+Build scripts use Bash (Git Bash on Windows). For checksum verification on
+Windows, use `(cd dist && sha256sum --check SHA256SUMS)` instead of `shasum`.
 
 `dist/` is not tracked in Git, and neither is any other build output. Both
 actions resolve their binary in two steps:
 
-1. If `dist/<program>-<os>-<arch>` exists in the checkout (`os` is `linux` or
-   `darwin`), it is used
+1. If `dist/<program>-<os>-<arch>` exists in the checkout (`os` is `linux`,
+   `darwin`, or `windows`, with `.exe` appended on Windows), it is used
    directly. This is how local development, CI, and the smoke workflow exercise
    the code under review rather than a published artifact.
 2. Otherwise the binary is downloaded from the release the action itself was
@@ -745,9 +756,10 @@ passing attestation, so no checksum has to be committed alongside the action.
 
 ## Releases
 
-Both release workflows include `cache-server-darwin-arm64`, its SHA-256
-checksum in `SHA256SUMS`, and build provenance alongside the Linux binaries.
-No macOS optimiser binary is published.
+Both release workflows include `cache-server-darwin-arm64`,
+`cache-server-windows-amd64.exe`, and `cache-server-windows-arm64.exe`, their
+SHA-256 checksums in `SHA256SUMS`, and build provenance alongside the Linux
+binaries. No macOS or Windows optimiser binary is published.
 
 Release tags point at the reviewed commit itself, so the tree a consumer checks
 out is exactly the tree CI ran against. Enable

@@ -27,7 +27,7 @@ jobs:
   smoke:
     strategy:
       matrix:
-        runner: [ubuntu-24.04, macos-15]
+        runner: [ubuntu-24.04, macos-15, windows-2025, windows-11-arm]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,9 +35,11 @@ jobs:
         with:
           go-version-file: .go-version
           cache: true
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       # Build locally so the smoke test exercises this commit rather than a
       # binary downloaded from a release.
       - name: Build server binaries
+        shell: bash
         env:
           VERSION: smoke-${{ github.sha }}
         run: scripts/build-dist.sh
@@ -52,9 +54,14 @@ jobs:
         id: object
         shell: bash
         run: |
-          printf '%s' 'bazel-github-actions-cache-v2-smoke-v0.2.0' > "$RUNNER_TEMP/cache-object"
-          digest=$(shasum -a 256 "$RUNNER_TEMP/cache-object" | cut -d' ' -f1)
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          node <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const data = Buffer.from("bazel-github-actions-cache-v2-smoke-v0.2.0");
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, "cache-object"), data);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `digest=${crypto.createHash("sha256").update(data).digest("hex")}\n`);
+          NODE
       - name: Seed cache
         if: github.event_name == 'push' || inputs.mode == 'seed'
         shell: bash

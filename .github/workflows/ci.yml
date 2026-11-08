@@ -66,3 +66,47 @@ jobs:
         run: |
           (cd dist && shasum -a 256 --check SHA256SUMS)
           test "$(dist/cache-server-darwin-arm64 --version)" = "$VERSION"
+
+  windows:
+    strategy:
+      matrix:
+        include:
+          - runner: windows-2025
+            architecture: amd64
+            race: "-race"
+          - runner: windows-11-arm
+            architecture: arm64
+            race: ""
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+          cache: true
+          architecture: ${{ matrix.architecture == 'amd64' && 'x64' || matrix.architecture }}
+      - name: Require native Go architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+        run: test "$(go env GOHOSTARCH)" = "$EXPECTED_ARCH"
+      # Go does not support the race detector on Windows ARM64.
+      - name: Cache server Go tests
+        env:
+          RACE: ${{ matrix.race }}
+        run: go test $RACE ./cmd/cache-server ./internal/server ./internal/cache ./internal/artifact
+      - name: Node cache server wrapper and lifecycle tests
+        run: node --test action/*.test.js
+      - name: Build packaged binaries
+        env:
+          VERSION: ci-${{ github.sha }}
+        run: scripts/build-dist.sh
+      - name: Verify packaged checksums and native server
+        env:
+          VERSION: ci-${{ github.sha }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          (cd dist && sha256sum --check SHA256SUMS)
+          test "$(dist/cache-server-windows-$ARCHITECTURE.exe --version)" = "$VERSION"

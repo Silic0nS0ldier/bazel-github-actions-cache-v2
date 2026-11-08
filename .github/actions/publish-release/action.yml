@@ -38,6 +38,8 @@ runs:
           dist/cache-server-darwin-arm64
           dist/cache-server-linux-amd64
           dist/cache-server-linux-arm64
+          dist/cache-server-windows-amd64.exe
+          dist/cache-server-windows-arm64.exe
 
     # The tag points at the reviewed commit itself, so the tree a consumer
     # checks out is exactly the tree CI ran against.
@@ -75,6 +77,8 @@ runs:
           dist/cache-server-darwin-arm64 \
           dist/cache-server-linux-amd64 \
           dist/cache-server-linux-arm64 \
+          dist/cache-server-windows-amd64.exe \
+          dist/cache-server-windows-arm64.exe \
           dist/SHA256SUMS
         publish=(gh release edit "$VERSION" --draft=false)
         if [[ "$PRERELEASE" != "true" ]]; then
