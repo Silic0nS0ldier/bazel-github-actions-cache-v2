@@ -244,11 +244,6 @@ func (s *Server) writeObject(
 	if kind == "cas" && hex.EncodeToString(hasher.Sum(nil)) != digest {
 		return errPayloadMismatch
 	}
-	if err := s.fileIO.do(ctx, file.Sync); err != nil {
-		s.cfg.Logger.Printf("sync upload spool for %s/%s: %v", kind, digest, err)
-		return errLocalFailure
-	}
-
 	keep, err = s.storeObjectFile(ctx, kind, digest, file, path, n)
 	return err
 }

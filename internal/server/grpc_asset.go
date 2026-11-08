@@ -359,9 +359,6 @@ func (s *Server) downloadAsset(
 	if actual != checksum {
 		return "", digestReference{}, fmt.Errorf("content is %s, not the requested %s", actual, checksum)
 	}
-	if err := file.Sync(); err != nil {
-		return "", digestReference{}, fmt.Errorf("sync asset spool: %w", err)
-	}
 	keep = true
 	return path, digestReference{hash: hex.EncodeToString(canonical.Sum(nil)), size: size}, nil
 }

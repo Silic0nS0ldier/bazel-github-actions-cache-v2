@@ -445,9 +445,6 @@ func (s *Server) resolveObject(ctx context.Context, key, kind, digest string) (o
 		return object{}, false, nil
 	}
 	s.stats.backendDownloads.Add(1)
-	if err := file.Sync(); err != nil {
-		return object{}, false, fmt.Errorf("sync download spool: %w", err)
-	}
 	info, err := file.Stat()
 	if err != nil {
 		return object{}, false, fmt.Errorf("stat download spool: %w", err)
