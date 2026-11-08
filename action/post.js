@@ -17,9 +17,20 @@ function processExists(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    if (error.code === "EPERM") return true;
+    throw error;
   }
+}
+
+async function waitForProcessExit(pid, timeoutMilliseconds) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (processExists(pid)) {
+    if (Date.now() >= deadline) return false;
+    await sleep(100);
+  }
+  return true;
 }
 
 // buildSummary is separated from the post step so the rendered tables can
@@ -202,37 +213,56 @@ async function post() {
   const binary = process.env.STATE_binary;
   const tempDir = process.env.STATE_temp_dir;
   const shutdownWaitSeconds = Number.parseInt(process.env.STATE_shutdown_wait_seconds || "330", 10);
-  if (!url || !token || !Number.isSafeInteger(pid)) {
+  const hasProcess = Number.isSafeInteger(pid) && pid > 0;
+  const canShutdown = Boolean(hasProcess && url && token);
+  if (!hasProcess) {
     // The main step already printed an excerpt when the server failed to start.
     reportLog({ logFile, name: logArtifact, binary, print: false });
-    process.stdout.write("Cache server state is absent; no cleanup is needed.\n");
-    return;
+    process.stdout.write("Cache server process state is absent; no shutdown is needed.\n");
   }
 
-  try {
-    const response = await request(`${url}/shutdown`, {
-      method: "POST",
-      headers: { "X-Shutdown-Token": token },
-      timeout: 3000,
-    });
-    if (response.status !== 202) {
-      process.stderr.write(`::warning::cache shutdown returned HTTP ${response.status}\n`);
+  if (canShutdown) {
+    try {
+      const response = await request(`${url}/shutdown`, {
+        method: "POST",
+        headers: { "X-Shutdown-Token": token },
+        timeout: 3000,
+      });
+      if (response.status !== 202) {
+        process.stderr.write(`::warning::cache shutdown returned HTTP ${response.status}\n`);
+      }
+    } catch (error) {
+      process.stderr.write(`::warning::cache shutdown request failed: ${error.message}\n`);
     }
-  } catch (error) {
-    process.stderr.write(`::warning::cache shutdown request failed: ${error.message}\n`);
   }
 
-  const shutdownAttempts = Number.isSafeInteger(shutdownWaitSeconds) && shutdownWaitSeconds > 0
-    ? shutdownWaitSeconds * 10
-    : 3300;
-  for (let attempt = 0; attempt < shutdownAttempts && processExists(pid); attempt += 1) {
-    await sleep(100);
-  }
-  if (processExists(pid)) {
-    process.stderr.write("::warning::cache server did not stop gracefully; sending SIGTERM\n");
+  const shutdownMilliseconds = Number.isSafeInteger(shutdownWaitSeconds) && shutdownWaitSeconds > 0
+    ? shutdownWaitSeconds * 1000
+    : 330_000;
+  let stopped = !hasProcess || await waitForProcessExit(pid, canShutdown ? shutdownMilliseconds : 0);
+  if (!stopped) {
+    // Node terminates the process unconditionally on Windows; it does not
+    // deliver a graceful SIGTERM. Wait for released file handles on every OS.
+    process.stderr.write("::warning::cache server did not stop gracefully; terminating it\n");
     try {
       process.kill(pid, "SIGTERM");
-    } catch {}
+    } catch (error) {
+      if (error.code !== "ESRCH") {
+        process.stderr.write(`::warning::cannot terminate cache server: ${error.message}\n`);
+      }
+    }
+    stopped = await waitForProcessExit(pid, 10_000);
+    if (!stopped) {
+      process.stderr.write("::warning::cache server ignored termination; killing it\n");
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch (error) {
+        if (error.code !== "ESRCH") {
+          process.stderr.write(`::warning::cannot kill cache server: ${error.message}\n`);
+        }
+      }
+      stopped = await waitForProcessExit(pid, 10_000);
+    }
   }
 
   let stats = {};
@@ -248,8 +278,13 @@ async function post() {
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, buildSummary(stats));
   }
 
-  reportLog({ logFile, name: logArtifact, binary, print: true });
-  if (tempDir) {
+  if (hasProcess) {
+    reportLog({ logFile, name: logArtifact, binary, print: true });
+  }
+  if (!stopped) {
+    process.stderr.write("::warning::cache server is still running; leaving its temporary directory intact\n");
+  }
+  if (tempDir && stopped) {
     try {
       fs.rmSync(safeTemporaryDirectory(tempDir), { recursive: true, force: true });
     } catch (error) {
@@ -264,4 +299,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { buildSummary, publishLog };
+module.exports = { buildSummary, processExists, publishLog, waitForProcessExit };

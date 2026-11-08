@@ -5,18 +5,21 @@ const assert = require("node:assert/strict");
 
 const { artifactName, serverArchitecture, startupTimeoutMilliseconds } = require("./main");
 
-test("the server supports Linux amd64/arm64 and Apple Silicon macOS", () => {
+test("the server supports Linux and Windows amd64/arm64 and Apple Silicon macOS", () => {
   assert.equal(serverArchitecture("linux", "x64"), "amd64");
   assert.equal(serverArchitecture("linux", "arm64"), "arm64");
   assert.equal(serverArchitecture("darwin", "arm64"), "arm64");
+  assert.equal(serverArchitecture("win32", "x64"), "amd64");
+  assert.equal(serverArchitecture("win32", "arm64"), "arm64");
 });
 
 test("Intel macOS and unsupported runner platforms or architectures are rejected", () => {
   assert.throws(() => serverArchitecture("darwin", "x64"), /macOS requires Apple Silicon/);
   assert.throws(() => serverArchitecture("darwin", "ia32"), /macOS requires Apple Silicon/);
   assert.throws(() => serverArchitecture("linux", "riscv64"), /unsupported Linux architecture/);
-  for (const platform of ["win32", "freebsd", undefined]) {
-    assert.throws(() => serverArchitecture(platform, "arm64"), /supports Linux and Apple Silicon macOS/);
+  assert.throws(() => serverArchitecture("win32", "ia32"), /unsupported Windows architecture/);
+  for (const platform of ["freebsd", undefined]) {
+    assert.throws(() => serverArchitecture(platform, "arm64"), /supports Linux, Apple Silicon macOS, and Windows/);
   }
 });
 

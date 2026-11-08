@@ -81,9 +81,22 @@ test("only the server is published for macOS, and only for Apple Silicon", () =>
       assert.equal(assetName(program, architecture, "linux"), `${program}-linux-${architecture}`);
     }
   }
-  for (const platform of ["win32", "freebsd", "../linux", ""]) {
+  for (const platform of ["freebsd", "../linux", ""]) {
     assert.throws(() => assetName("cache-server", "arm64", platform), /unsupported platform/);
   }
+});
+
+test("Windows publishes only amd64/arm64 server executables", () => {
+  for (const architecture of ["amd64", "arm64"]) {
+    const asset = assetName("cache-server", architecture, "win32");
+    assert.equal(asset, `cache-server-windows-${architecture}.exe`);
+    assert.equal(
+      releaseAssetUrl(REPOSITORY, "pre-20261108T120614Z", asset),
+      `https://github.com/${REPOSITORY}/releases/download/pre-20261108T120614Z/${asset}`,
+    );
+    assert.throws(() => assetName("cache-optimiser", architecture, "win32"), /unsupported platform/);
+  }
+  assert.throws(() => assetName("cache-server", "386", "win32"), /unknown architecture/);
 });
 
 // The program name reaches a download URL and an install path, so only names
@@ -233,20 +246,39 @@ test("macOS resolves its local server binary rather than a Linux ARM64 binary", 
   );
 });
 
-test("Linux and macOS ARM64 server binaries do not collide in the tool cache", async (t) => {
+for (const architecture of ["amd64", "arm64"]) {
+  test(`Windows resolves its local ${architecture} executable rather than a Linux binary`, async (t) => {
+    const root = workspace(t);
+    const actionRoot = path.join(root, "checkout with spaces");
+    const dist = path.join(actionRoot, "dist");
+    fs.mkdirSync(dist, { recursive: true });
+    fs.writeFileSync(path.join(dist, assetName("cache-server", architecture)), "Linux server");
+    const local = path.join(dist, assetName("cache-server", architecture, "win32"));
+    fs.writeFileSync(local, "Windows server");
+    stubFetch(t, () => {
+      throw new Error("a local binary must not require a release download");
+    });
+    assert.equal(
+      await resolve({ actionRoot, platform: "win32", architecture, repository: undefined }),
+      local,
+    );
+  });
+}
+
+test("Linux, macOS, and Windows ARM64 server binaries do not collide in the tool cache", async (t) => {
   const root = workspace(t);
   const toolCacheRoot = path.join(root, "tools");
   const cacheDir = path.join(toolCacheRoot, "bazel-gha-cache-server", "v1.2.3", "arm64");
   fs.mkdirSync(cacheDir, { recursive: true });
-  for (const platform of ["linux", "darwin"]) {
+  for (const platform of ["linux", "darwin", "win32"]) {
     fs.writeFileSync(path.join(cacheDir, assetName("cache-server", "arm64", platform)), platform);
   }
   stubFetch(t, () => {
     throw new Error("a cached binary must not require a release download");
   });
 
-  for (const platform of ["linux", "darwin"]) {
-    const installPath = path.join(root, "cache-server");
+  for (const platform of ["linux", "darwin", "win32"]) {
+    const installPath = path.join(root, platform === "win32" ? "cache-server.exe" : "cache-server");
     const resolved = await resolve({
       actionRoot: path.join(root, "checkout"),
       architecture: "arm64",
@@ -256,7 +288,9 @@ test("Linux and macOS ARM64 server binaries do not collide in the tool cache", a
     });
     assert.strictEqual(resolved, installPath);
     assert.strictEqual(fs.readFileSync(resolved, "utf8"), platform);
-    assert.strictEqual(fs.statSync(resolved).mode & 0o777, 0o700);
+    if (process.platform !== "win32") {
+      assert.strictEqual(fs.statSync(resolved).mode & 0o777, 0o700);
+    }
   }
 });
 
@@ -312,12 +346,12 @@ test("a download that lands on plain HTTP is refused before the body is read", a
   assert.ok(served, "the endpoint should have been reached and then rejected");
 });
 
-for (const platform of ["linux", "darwin"]) {
+for (const platform of ["linux", "darwin", "win32"]) {
   test(`a ${platform} binary whose provenance cannot be verified is discarded`, async (t) => {
     const root = workspace(t);
     const toolCacheRoot = path.join(root, "tools");
     const actionRoot = path.join(root, "checkout");
-    if (platform === "darwin") {
+    if (platform !== "linux") {
       fs.mkdirSync(path.join(actionRoot, "dist"), { recursive: true });
       fs.writeFileSync(path.join(actionRoot, "dist", assetName("cache-server", "arm64")), "Linux server");
     }

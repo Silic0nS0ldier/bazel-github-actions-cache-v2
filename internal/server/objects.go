@@ -8,8 +8,22 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
+	"sync"
 	"sync/atomic"
 )
+
+type lockedObjectReader struct {
+	*os.File
+	unlock func()
+	once   sync.Once
+}
+
+func (r *lockedObjectReader) Close() error {
+	err := r.File.Close()
+	r.once.Do(r.unlock)
+	return err
+}
 
 type readSeekCloser struct {
 	*bytes.Reader
@@ -100,7 +114,12 @@ func (s *Server) readObjectWithObjectFilesLock(ctx context.Context, kind, digest
 // returned reader. A successful call counts a cache hit.
 func (s *Server) openObject(ctx context.Context, kind, digest string) (io.ReadSeekCloser, int64, error) {
 	s.objectFilesMu.RLock()
-	defer s.objectFilesMu.RUnlock()
+	unlock := true
+	defer func() {
+		if unlock {
+			s.objectFilesMu.RUnlock()
+		}
+	}()
 	obj, err := s.readObjectWithObjectFilesLock(ctx, kind, digest)
 	if err != nil {
 		return nil, 0, err
@@ -122,6 +141,12 @@ func (s *Server) openObject(ctx context.Context, kind, digest string) (io.ReadSe
 			return nil, 0, errCacheMiss
 		}
 		return nil, 0, errLocalFailure
+	}
+	if file, ok := reader.(*os.File); ok && runtime.GOOS == "windows" {
+		// Windows cannot unlink an open spool file. Keep the deletion lock
+		// until the transport closes its reader, not just until it opens it.
+		reader = &lockedObjectReader{File: file, unlock: s.objectFilesMu.RUnlock}
+		unlock = false
 	}
 	s.stats.hits.Add(1)
 	return reader, obj.size, nil
@@ -170,7 +195,8 @@ func (s *Server) readObjectBytes(ctx context.Context, kind, digest string) ([]by
 }
 
 func (s *Server) gateReader(ctx context.Context, reader io.Reader) io.Reader {
-	if _, fileBacked := reader.(*os.File); fileBacked {
+	switch reader.(type) {
+	case *os.File, *lockedObjectReader:
 		return gatedReader{ctx: ctx, gate: s.fileIO, r: reader}
 	}
 	return reader
@@ -259,6 +285,14 @@ func (s *Server) storeObjectFile(
 ) (bool, error) {
 	keep := false
 	packed := s.packs != nil
+	if packed && runtime.GOOS == "windows" {
+		// Publication reads packed objects by path. Close the upload handle
+		// before staging can wake a worker that removes the original spool.
+		if err := s.fileIO.do(ctx, file.Close); err != nil {
+			s.cfg.Logger.Printf("close upload spool for %s/%s: %v", kind, digest, err)
+			return false, errLocalFailure
+		}
+	}
 	if packed {
 		s.objectFilesMu.RLock()
 	}

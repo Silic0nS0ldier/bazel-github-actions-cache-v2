@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -234,6 +235,44 @@ func burstPackedConfig(backend *memoryBackend) func(*Config) {
 	}
 }
 
+func TestPackedSpoolReaderClosesBeforeDeletion(t *testing.T) {
+	backend := newMemoryBackend()
+	server := testServer(t, backend, burstPackedConfig(backend))
+	t.Cleanup(func() { closePackedServer(t, server) })
+	data := []byte("packed spool reader")
+	if err := server.writeObject(t.Context(), "cas", digest(data), bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatal(err)
+	}
+	reader, _, err := server.openObject(t.Context(), "cas", digest(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if runtime.GOOS == "windows" {
+		if server.objectFilesMu.TryLock() {
+			server.objectFilesMu.Unlock()
+			t.Fatal("open Windows spool reader did not hold the deletion lock")
+		}
+	}
+	got, err := io.ReadAll(server.gateReader(t.Context(), reader))
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("read spool = %q, %v", got, err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !server.objectFilesMu.TryLock() {
+		t.Fatal("closed spool reader still holds the deletion lock")
+	}
+	server.objectFilesMu.Unlock()
+	if err := server.packs.flush(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if files := spoolFiles(t, server.cfg.CacheDir); len(files) != 0 {
+		t.Fatalf("packed publication left object spool files: %v", files)
+	}
+}
+
 // restoredPackedServer seeds one pack with count blobs and returns a fresh
 // server that can only serve them by restoring that pack.
 func restoredPackedServer(t *testing.T, count int) (*Server, [][]byte) {
@@ -299,9 +338,12 @@ func TestPackedReadsShareOneReaderPerPack(t *testing.T) {
 		t.Fatalf("loaded %d packs, want 1", len(server.packs.loadedPacks))
 	}
 	for _, pack := range server.packs.loadedPacks {
-		// The open reader keeps serving even once its path is gone.
-		if err := os.Remove(pack.path); err != nil {
-			t.Fatal(err)
+		// Unix permits unlinking a mapped file; Windows keeps its path until
+		// the reader closes. Both must reuse the same restored reader.
+		if runtime.GOOS != "windows" {
+			if err := os.Remove(pack.path); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	server.packs.mu.Unlock()
