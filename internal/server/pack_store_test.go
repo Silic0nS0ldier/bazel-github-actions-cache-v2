@@ -62,7 +62,6 @@ func testPackedServer(t *testing.T, backend *memoryBackend) *Server {
 func testPackedServerWithMaxBlob(t *testing.T, backend *memoryBackend, maxBlobSize int64) *Server {
 	t.Helper()
 	return testServer(t, backend, func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = memoryCatalog{backend: backend}
 		cfg.MaxBlobSize = maxBlobSize
 		cfg.PackSize = 1024
@@ -356,7 +355,6 @@ func TestPackedStoreRetriesAnUnrestorablePackOnlyOnce(t *testing.T) {
 	}
 
 	restore := testServer(t, backend, func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = phantomCatalog{memoryCatalog{backend: backend}, []string{packKey}}
 		cfg.PackSize = 1024
 		cfg.PackFlushInterval = time.Hour
@@ -406,7 +404,6 @@ func TestPackedStoreLimitsDownloadedManifestsWithoutCountingPacks(t *testing.T) 
 	}
 
 	restore := testServer(t, backend, func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = memoryCatalog{backend: backend}
 		cfg.PackSize = 1024
 		cfg.PackFlushInterval = time.Hour
@@ -455,7 +452,6 @@ func TestPackedStoreDoesNotSpendTheManifestLimitOnOrphans(t *testing.T) {
 	backend.mu.Unlock()
 
 	restore := testServer(t, backend, func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = memoryCatalog{backend: backend}
 		cfg.PackSize = 1024
 		cfg.PackFlushInterval = time.Hour
@@ -678,7 +674,6 @@ func TestPackedStoreServesReadsWhileAFlushIsUploading(t *testing.T) {
 		release:       make(chan struct{}),
 	}
 	server := testServer(t, backend, func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = memoryCatalog{backend: memory}
 		cfg.PackSize = 1024
 		cfg.PackFlushInterval = time.Hour

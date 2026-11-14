@@ -214,9 +214,8 @@ func (v *actionResultValidator) loadCAS(reference digestReference) (object, erro
 	return cachedObject, nil
 }
 
-// casPresence reports availability without downloading where the storage mode
-// allows it, and the recorded object size when it is known. Publication still
-// demands a persisted entry.
+// casPresence reports availability and size from the manifest without
+// downloading the object. Publication still demands a persisted entry.
 func (v *actionResultValidator) casPresence(digest string) (int64, bool, error) {
 	if v.requirePersisted {
 		found, err := v.server.backendExists(v.context, v.server.objectKey("cas", digest))

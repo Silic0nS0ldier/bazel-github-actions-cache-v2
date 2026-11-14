@@ -23,12 +23,8 @@ test("Intel macOS and unsupported runner platforms or architectures are rejected
   }
 });
 
-test("packed startup waits for its configured manifest-discovery deadline", () => {
-  assert.equal(startupTimeoutMilliseconds("packs", 300), 300_000);
-});
-
-test("object startup retains the short local-server readiness deadline", () => {
-  assert.equal(startupTimeoutMilliseconds("objects", 300), 15_000);
+test("startup waits for the configured manifest-discovery deadline", () => {
+  assert.equal(startupTimeoutMilliseconds(300), 300_000);
 });
 
 function withInput(name, value, run) {

@@ -52,7 +52,6 @@ func run() error {
 		grpcPort         = flag.Int("grpc-port", 0, "loopback TCP port for the gRPC remote-cache API; zero selects a dynamic port")
 		cacheDir         = flag.String("cache-dir", "", "local spool directory")
 		keyPrefix        = flag.String("key-prefix", "bazel-http-v1", "GitHub cache key prefix")
-		storageMode      = flag.String("storage-mode", "objects", "storage mode: objects or packs")
 		packSize         = flag.Int64("pack-size", 8*1024*1024, "target CARv2 pack size in bytes")
 		packFlush        = flag.Duration("pack-flush-interval", 30*time.Second, "maximum delay before flushing pending CARv2 data")
 		packRenew        = flag.Duration("pack-renew-interval", 15*time.Second, "delay before renewing retention for packs that only presence checks touched")
@@ -114,19 +113,15 @@ func run() error {
 		}
 	}
 	logger := log.New(os.Stderr, "bazel-gha-cache: ", log.LstdFlags|log.LUTC)
-	var catalog cache.Catalog
-	if *storageMode == "packs" {
-		catalog, err = cache.NewActionsCatalog(*backendTimeout, logger)
-		if err != nil {
-			return err
-		}
+	catalog, err := cache.NewActionsCatalog(*backendTimeout, logger)
+	if err != nil {
+		return err
 	}
 	srv, err := cacheserver.New(cacheserver.Config{
 		Backend:              backend,
 		Catalog:              catalog,
 		CacheDir:             dir,
 		KeyPrefix:            *keyPrefix,
-		StorageMode:          *storageMode,
 		PackSize:             *packSize,
 		PackFlushInterval:    *packFlush,
 		PackRenewInterval:    *packRenew,

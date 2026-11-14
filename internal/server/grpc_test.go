@@ -186,9 +186,9 @@ func TestGRPCFindMissingBlobsBatchesPresenceChecks(t *testing.T) {
 	if len(missing) != 1 || missing[0].GetHash() != absentReference.hash {
 		t.Fatalf("missing = %v, want only %s", missing, absentReference.hash)
 	}
-	// The empty digest is answered locally; only the other two reach the backend.
-	if calls := backend.existsCount(); calls != 2 {
-		t.Fatalf("backend existence checks = %d, want 2", calls)
+	// All presence checks are answered from the manifest view or locally.
+	if calls := backend.existsCount(); calls != 0 {
+		t.Fatalf("backend existence checks = %d, want none", calls)
 	}
 }
 
@@ -279,7 +279,7 @@ func TestAccountingSeparatesCallsFromObjectsAndBackendEntries(t *testing.T) {
 			headCacheObject(server, "/cas/"+reference.hash)
 		}
 		stats := server.Snapshot()
-		if stats.Requests != 3 || stats.Operations != 3 || stats.BackendRequests != 2 {
+		if stats.Requests != 3 || stats.Operations != 3 || stats.BackendRequests != 0 {
 			t.Fatalf("unexpected stats: %+v", stats)
 		}
 	})
@@ -298,7 +298,7 @@ func TestAccountingSeparatesCallsFromObjectsAndBackendEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 		stats := server.Snapshot()
-		if stats.Requests != 1 || stats.Operations != 3 || stats.BackendRequests != 2 {
+		if stats.Requests != 1 || stats.Operations != 3 || stats.BackendRequests != 0 {
 			t.Fatalf("unexpected stats: %+v", stats)
 		}
 	})

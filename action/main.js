@@ -21,11 +21,10 @@ const { resolveBinary } = require("./release");
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-function startupTimeoutMilliseconds(storageMode, backendTimeoutSeconds) {
-  // Packed mode restores every discoverable manifest before accepting Bazel
-  // requests. Its server-side discovery already has this deadline, so the
-  // wrapper must not report a false startup failure after a fixed 15 seconds.
-  return (storageMode === "packs" ? backendTimeoutSeconds : 15) * 1000;
+function startupTimeoutMilliseconds(backendTimeoutSeconds) {
+  // The server restores every discoverable manifest before accepting Bazel
+  // requests, so startup may take as long as backend discovery.
+  return backendTimeoutSeconds * 1000;
 }
 
 function artifactName(name) {
@@ -88,10 +87,6 @@ async function main() {
   const maxConcurrent = positiveInteger("max-concurrent-operations", 4, 32);
   const uploadsPerMinute = positiveInteger("max-uploads-per-minute", 180, 199);
   const backendTimeoutSeconds = positiveInteger("backend-timeout-seconds", 300, 3600);
-  const storageMode = input("storage-mode", "objects").trim().toLowerCase();
-  if (!["objects", "packs"].includes(storageMode)) {
-    throw new Error("storage-mode must be objects or packs");
-  }
   const packSizeMB = positiveInteger("pack-size-mb", 8, 32);
   const packFlushSeconds = positiveInteger("pack-flush-seconds", 30, 3600);
   const packRenewSeconds = positiveInteger("pack-renew-seconds", 15, 3600);
@@ -99,8 +94,8 @@ async function main() {
   const packCompressionLevel = positiveInteger("pack-compression-level", 3, 19);
   const maxManifests = positiveInteger("max-manifests", 2048, 10_000);
   const githubToken = input("github-token", "");
-  if (storageMode === "packs" && !githubToken) {
-    throw new Error("storage-mode=packs requires github-token with actions: read");
+  if (!githubToken) {
+    throw new Error("github-token with actions: read is required to discover cache manifests");
   }
   if (githubToken) mask(githubToken);
   const port = portNumber("port");
@@ -153,8 +148,6 @@ async function main() {
     spoolDir,
     "--key-prefix",
     input("key-prefix", "bazel-http-v1"),
-    "--storage-mode",
-    storageMode,
     "--pack-size",
     String(packSizeMB * 1024 * 1024),
     "--pack-flush-interval",
@@ -212,7 +205,7 @@ async function main() {
   saveState("stats_file", statsFile);
   saveState("shutdown_wait_seconds", String(Math.max(60, backendTimeoutSeconds + 30)));
 
-  const readyDeadline = Date.now() + startupTimeoutMilliseconds(storageMode, backendTimeoutSeconds);
+  const readyDeadline = Date.now() + startupTimeoutMilliseconds(backendTimeoutSeconds);
   let ready;
   while (Date.now() < readyDeadline) {
     if (fs.existsSync(readyFile)) {
@@ -248,7 +241,7 @@ async function main() {
   );
   setOutput("initial-stats", '{"requests":0,"hits":0,"misses":0,"uploads":0}');
   process.stdout.write(
-    `Bazel cache adapter ready at ${ready.url} and ${ready.grpc_url} (write=${writeEnabled}, mode=${storageMode}, fail_open=${failOpen}, pid=${ready.pid})${os.EOL}`,
+    `Bazel cache adapter ready at ${ready.url} and ${ready.grpc_url} (write=${writeEnabled}, fail_open=${failOpen}, pid=${ready.pid})${os.EOL}`,
   );
 }
 

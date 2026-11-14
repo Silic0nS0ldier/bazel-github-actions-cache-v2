@@ -37,6 +37,7 @@ runner temporary directory's Windows ACLs rather than Unix permission bits.
 ```yaml
 permissions:
   contents: read
+  actions: read
 
 steps:
   - uses: actions/checkout@<FULL_COMMIT_SHA>
@@ -71,17 +72,16 @@ Bazel.
 
 ### CARv2 packs and manifest DAGs
 
-`storage-mode: packs` is the v0.3 storage format. Instead of creating one
-GitHub cache entry for every CAS or Action Cache object, it writes many values
-to a modest CARv2 archive (8 MiB by default) and publishes one immutable
-DAG-CBOR manifest after that archive is available. A large output is placed in
-its own archive. The result is normally two Actions-cache creations per pack
-(one pack and one manifest), rather than one per Bazel object.
+The cache stores objects in modest CARv2 archives (8 MiB by default) and
+publishes one immutable DAG-CBOR manifest after each archive is available.
+A large output is placed in its own archive. The result is normally two
+Actions-cache creations per pack (one pack and one manifest), rather than one
+per Bazel object.
 
 ```yaml
 permissions:
   contents: read
-  actions: read # manifest discovery for storage-mode: packs
+  actions: read # manifest discovery
 
 steps:
   - id: bazel-cache
@@ -89,15 +89,14 @@ steps:
     with:
       write: auto
       key-prefix: ironmesh-bazel-car-v1
-      storage-mode: packs
       pack-size-mb: "8"
 ```
 
 The `github-token` input defaults to `${{ github.token }}` and is used only to
 list immutable manifest keys through GitHub's documented Actions-cache REST
 endpoint. It must have `actions: read`; no external service, secret, or write
-token is needed. Keep the packed mode in a new `key-prefix`: it deliberately
-does not reinterpret or mix v0.2 object keys.
+token is needed. Use a new `key-prefix` when moving from an earlier release:
+the packed format does not read or migrate legacy object-per-entry keys.
 
 Writers discover all current manifest heads at startup and make each new
 manifest a child of every head they observed. Parallel writers can therefore
@@ -215,13 +214,12 @@ Do not enable Bazel remote-cache compression with this release.
 | `write` | `auto` | `auto`, `true`, or `false`; forks are always read-only |
 | `fail-on-cache-error` | `false` | Strict mode; by default backend failures degrade to misses/soft upload success |
 | `key-prefix` | `bazel-http-v1` | Immutable namespace; change to invalidate entries |
-| `storage-mode` | `objects` | `objects` (v0.2) or `packs` (CARv2 and manifest DAG) |
-| `pack-size-mb` | `8` | Target size for a CARv2 archive; only for `packs`, 1–32 MiB |
-| `pack-flush-seconds` | `30` | Maximum local staging interval; only for `packs` |
-| `pack-renew-seconds` | `15` | Batching delay for pack retention renewals; only for `packs` |
-| `pack-compression` | `true` | Compress pack blocks with zstd; only for `packs` |
-| `pack-compression-level` | `3` | zstd level for pack blocks, 1–19; only for `packs` |
-| `max-manifests` | `2048` | Maximum manifests downloaded during discovery; only for `packs` |
+| `pack-size-mb` | `8` | Target size for a CARv2 archive, 1–32 MiB |
+| `pack-flush-seconds` | `30` | Maximum local staging interval |
+| `pack-renew-seconds` | `15` | Batching delay for pack retention renewals |
+| `pack-compression` | `true` | Compress pack blocks with zstd |
+| `pack-compression-level` | `3` | zstd level for pack blocks, 1–19 |
+| `max-manifests` | `2048` | Maximum manifests downloaded during discovery |
 | `github-token` | `${{ github.token }}` | `actions: read` token for packed-manifest discovery |
 | `max-blob-size-mb` | `512` | Maximum spooled upload/download size |
 | `max-concurrent-operations` | `4` | Backend-operation backpressure |
@@ -275,19 +273,18 @@ whether it was downloaded or only presence-checked:
 }
 ```
 
-`size` is absent when nothing reported one, which objects mode never does for a
-bare presence check. It is never defaulted to zero, because zero is a real size
-belonging to a blob with a well-known digest.
+`size` is absent when nothing reported one. It is never defaulted to zero,
+because zero is a real size belonging to a blob with a well-known digest.
 
 The distinction matters. Under `--remote_download_minimal` most outputs are only
 ever presence-checked: they still have to exist, or the action result referencing
 them becomes a miss, but nothing needs their bytes. An entry with no presence
 checks and no downloads is the only kind nothing depends on.
 
-`pack_bytes_used` against `pack_bytes_declared` is the headline number for
-`packs` mode. It is the share of a restored pack's content a job turned out to
-want, so a low ratio means packs are placing frequently and rarely fetched
-content together. `pack_bytes_restored` is what the transfers actually cost;
+`pack_bytes_used` against `pack_bytes_declared` is the headline number. It is
+the share of a restored pack's content a job turned out to want, so a low
+ratio means packs are placing frequently and rarely fetched content together.
+`pack_bytes_restored` is what the transfers actually cost;
 because blocks are compressed it is not comparable with either of the other two,
 and a ratio built on it can exceed 1. All three appear in the final statistics.
 
@@ -303,8 +300,7 @@ matching how they are read, and restoring one pack to get one blob pays for the
 rest. A second action regroups pack contents around the usage records and
 deletes what it replaces.
 
-It only applies to `storage-mode: packs`. Run it on a schedule, in its own
-workflow:
+Run the optimiser on a schedule, in its own workflow:
 
 ```yaml
 name: Optimise Bazel cache
@@ -602,7 +598,7 @@ Supported by both:
 - implicit handling of the standard SHA-256 zero-byte CAS digest
 - immutable cache keys
 - per-job coalescing of duplicate immutable uploads before rate limiting and backend publication
-- opt-in CARv2 archives with footer indexes, DAG-CBOR manifests, concurrent
+- CARv2 archives with footer indexes, DAG-CBOR manifests, concurrent
   writer head merging, and deterministic resolution of conflicting action results
 
 Not currently supported:
@@ -617,12 +613,12 @@ Not currently supported:
 
 ## Limits and operational model
 
-The `objects` format maps every Bazel AC or CAS object to one GitHub Actions
-cache entry. It remains the default rollback path. GitHub documents a limit of
-200 cache creations per minute; the action defaults to 180 evenly spaced
-uploads. In `packs` mode a successful flush consumes one creation for the CARv2
-pack and one for its manifest, so a large build graph is governed by pack count
-instead of object count. `pack_uploads`, `manifest_uploads`, and
+Earlier releases mapped every Bazel AC or CAS object to one GitHub Actions
+cache entry. The current packed format avoids that scaling problem. GitHub
+documents a limit of 200 cache creations per minute; the action defaults to
+180 evenly spaced uploads. A successful flush consumes one creation for the
+CARv2 pack and one for its manifest, so a large build graph is governed by pack
+count instead of object count. `pack_uploads`, `manifest_uploads`, and
 `pack_downloads` make that distinction explicit in the final statistics.
 
 Three counters describe load, and they deliberately do not agree:

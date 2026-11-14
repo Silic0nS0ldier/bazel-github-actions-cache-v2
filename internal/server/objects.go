@@ -152,9 +152,8 @@ func (s *Server) openObject(ctx context.Context, kind, digest string) (io.ReadSe
 	return reader, obj.size, nil
 }
 
-// casPresence answers a presence probe from the manifest view when the storage
-// mode allows it. Bazel issues these while building without needing the bytes,
-// so restoring a whole pack to answer one would defeat the point.
+// casPresence answers a presence probe from the manifest view without restoring
+// the pack. Bazel issues these while building without needing the bytes.
 func (s *Server) casPresence(ctx context.Context, digest string) (int64, error) {
 	s.stats.operations.Add(1)
 	size, found, err := s.presence(ctx, "cas", digest)
@@ -284,8 +283,7 @@ func (s *Server) storeObjectFile(
 	size int64,
 ) (bool, error) {
 	keep := false
-	packed := s.packs != nil
-	if packed && runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" {
 		// Publication reads packed objects by path. Close the upload handle
 		// before staging can wake a worker that removes the original spool.
 		if err := s.fileIO.do(ctx, file.Close); err != nil {
@@ -293,9 +291,7 @@ func (s *Server) storeObjectFile(
 			return false, errLocalFailure
 		}
 	}
-	if packed {
-		s.objectFilesMu.RLock()
-	}
+	s.objectFilesMu.RLock()
 	key := s.objectKey(kind, digest)
 	s.objectsMu.Lock()
 	stored, exists := s.objects[key]
@@ -307,40 +303,19 @@ func (s *Server) storeObjectFile(
 	s.objectsMu.Unlock()
 
 	if !s.cfg.WriteEnabled {
-		if packed {
-			s.objectFilesMu.RUnlock()
-		}
+		s.objectFilesMu.RUnlock()
 		s.stats.discardedUploads.Add(1)
 		return keep, nil
 	}
-	if packed {
-		retained, err := s.stagePacked(ctx, kind, digest, stored)
-		s.objectFilesMu.RUnlock()
-		if !retained {
-			s.discardPackedObject(key, stored.path)
-			if stored.path == path {
-				keep = false
-			}
+	retained, err := s.stagePacked(ctx, kind, digest, stored)
+	s.objectFilesMu.RUnlock()
+	if !retained {
+		s.discardPackedObject(key, stored.path)
+		if stored.path == path {
+			keep = false
 		}
-		return keep, err
 	}
-	if kind == "ac" {
-		if err := s.validateActionResultForPublication(ctx, object{path: path, size: size}); err != nil {
-			return keep, s.absorbActionResultFailure(digest, "publishing", err)
-		}
-		s.stats.validatedActionResults.Add(1)
-	}
-
-	deduplicated, err := s.publishOnce(ctx, key, file, size)
-	if err != nil {
-		return keep, s.absorbSaveFailure(kind, digest, err)
-	}
-	if deduplicated {
-		s.stats.deduplicatedUploads.Add(1)
-	} else {
-		s.stats.uploads.Add(1)
-	}
-	return keep, nil
+	return keep, err
 }
 
 // stagePacked hands an upload to the CARv2 pack writer, which publishes it as

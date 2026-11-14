@@ -112,17 +112,30 @@ func (b *memoryBackend) Save(_ context.Context, key string, src *os.File, size i
 
 func testServer(t *testing.T, backend cache.Backend, mutate func(*Config)) *Server {
 	t.Helper()
+	var catalogBackend *memoryBackend
+	switch backend := backend.(type) {
+	case *memoryBackend:
+		catalogBackend = backend
+	case *blockingSaveBackend:
+		catalogBackend = backend.memoryBackend
+	default:
+		t.Fatalf("test backend %T does not support cache catalog listing", backend)
+	}
 	cfg := Config{
-		Backend:          backend,
-		CacheDir:         t.TempDir(),
-		KeyPrefix:        "test-v1",
-		WriteEnabled:     true,
-		FailOpen:         true,
-		MaxBlobSize:      1024,
-		MaxConcurrent:    2,
-		UploadsPerMinute: 199,
-		BackendTimeout:   time.Second,
-		Logger:           log.New(io.Discard, "", 0),
+		Backend:           backend,
+		Catalog:           memoryCatalog{backend: catalogBackend},
+		CacheDir:          t.TempDir(),
+		KeyPrefix:         "test-v1",
+		PackSize:          1024,
+		PackFlushInterval: time.Hour,
+		MaxManifests:      100,
+		WriteEnabled:      true,
+		FailOpen:          true,
+		MaxBlobSize:       1024,
+		MaxConcurrent:     2,
+		UploadsPerMinute:  199,
+		BackendTimeout:    time.Second,
+		Logger:            log.New(io.Discard, "", 0),
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -131,6 +144,14 @@ func testServer(t *testing.T, backend cache.Backend, mutate func(*Config)) *Serv
 	if err != nil {
 		t.Fatal(err)
 	}
+	catalogBackend.mu.Lock()
+	for key, data := range catalogBackend.objects {
+		if strings.HasPrefix(key, cfg.KeyPrefix+"-cas-") || strings.HasPrefix(key, cfg.KeyPrefix+"-ac-") {
+			server.objects[key] = object{data: bytes.Clone(data), inMemory: true, size: int64(len(data))}
+		}
+	}
+	catalogBackend.mu.Unlock()
+	t.Cleanup(func() { closePackedServer(t, server) })
 	return server
 }
 
@@ -169,8 +190,15 @@ func TestCASPutHeadGet(t *testing.T) {
 		t.Fatalf("GET status/body = %d/%q", response.Code, response.Body.String())
 	}
 	stats := server.Snapshot()
-	if stats.Uploads != 1 || stats.Hits != 2 || stats.BytesServed != uint64(len(data)) {
+	if stats.Uploads != 0 || stats.Hits != 2 || stats.BytesServed != uint64(len(data)) {
 		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if err := server.packs.flush(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	stats = server.Snapshot()
+	if stats.PackUploads != 1 || stats.ManifestUploads != 1 || stats.Uploads != 2 {
+		t.Fatalf("cache object was not published as one pack and manifest: %+v", stats)
 	}
 }
 
@@ -199,7 +227,7 @@ func TestMissBreakdownAccountsForEveryMiss(t *testing.T) {
 	}
 }
 
-func TestDuplicateCASPutsArePublishedOnlyOnce(t *testing.T) {
+func TestDuplicateCASPutsArePackedOnce(t *testing.T) {
 	backend := newMemoryBackend()
 	server := testServer(t, backend, nil)
 	data := []byte("duplicate output")
@@ -211,18 +239,22 @@ func TestDuplicateCASPutsArePublishedOnlyOnce(t *testing.T) {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body)
 		}
 	}
-	stats := server.Snapshot()
-	if backend.saves != 1 || stats.Uploads != 1 || stats.DeduplicatedUploads != 1 {
-		t.Fatalf("duplicate PUT reached backend: saves=%d stats=%+v", backend.saves, stats)
+	server.packs.mu.Lock()
+	pending := len(server.packs.pendingCAS)
+	server.packs.mu.Unlock()
+	if pending != 1 {
+		t.Fatalf("pending CAS objects = %d, want one", pending)
+	}
+	if err := server.packs.flush(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if stats := server.Snapshot(); stats.PackUploads != 1 || stats.ManifestUploads != 1 {
+		t.Fatalf("duplicate PUT created more than one packed entry: %+v", stats)
 	}
 }
 
-func TestConcurrentDuplicateCASPutsShareOnePublication(t *testing.T) {
-	backend := &blockingSaveBackend{
-		memoryBackend: newMemoryBackend(),
-		started:       make(chan struct{}),
-		release:       make(chan struct{}),
-	}
+func TestConcurrentDuplicateCASPutsArePackedOnce(t *testing.T) {
+	backend := newMemoryBackend()
 	server := testServer(t, backend, nil)
 	data := []byte("concurrent duplicate output")
 	path := "/cas/" + digest(data)
@@ -232,9 +264,7 @@ func TestConcurrentDuplicateCASPutsShareOnePublication(t *testing.T) {
 		responses <- putCacheObject(server, path, data)
 	}
 	go put()
-	<-backend.started
 	go put()
-	close(backend.release)
 
 	for range 2 {
 		response := <-responses
@@ -242,9 +272,11 @@ func TestConcurrentDuplicateCASPutsShareOnePublication(t *testing.T) {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body)
 		}
 	}
-	stats := server.Snapshot()
-	if backend.saves != 1 || stats.Uploads != 1 || stats.DeduplicatedUploads != 1 {
-		t.Fatalf("concurrent PUTs were not coalesced: saves=%d stats=%+v", backend.saves, stats)
+	server.packs.mu.Lock()
+	pending := len(server.packs.pendingCAS)
+	server.packs.mu.Unlock()
+	if pending != 1 {
+		t.Fatalf("pending CAS objects = %d, want one", pending)
 	}
 }
 
@@ -321,7 +353,6 @@ func TestReadOnlyValidatesAndDiscardsBackendUpload(t *testing.T) {
 
 func TestFailOpenBackendErrors(t *testing.T) {
 	backend := newMemoryBackend()
-	backend.loadErr = errors.New("unavailable")
 	server := testServer(t, backend, nil)
 	request := httptest.NewRequest(http.MethodGet, "/ac/"+strings.Repeat("a", 64), nil)
 	response := httptest.NewRecorder()
@@ -330,7 +361,6 @@ func TestFailOpenBackendErrors(t *testing.T) {
 		t.Fatalf("status = %d, want 404", response.Code)
 	}
 
-	backend.loadErr = nil
 	backend.saveErr = errors.New("unavailable")
 	data := []byte("result")
 	request = httptest.NewRequest(http.MethodPut, "/cas/"+digest(data), bytes.NewReader(data))
@@ -339,29 +369,35 @@ func TestFailOpenBackendErrors(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want soft-success", response.Code)
 	}
+	if err := server.packs.flush(t.Context(), true); err == nil {
+		t.Fatal("packed backend failure was not surfaced by flush")
+	}
 	if server.Snapshot().BackendSaveErrors != 1 {
 		t.Fatalf("backend save failure was not counted: %+v", server.Snapshot())
 	}
+	backend.saveErr = nil
 }
 
 func TestStrictBackendErrors(t *testing.T) {
 	backend := newMemoryBackend()
-	backend.loadErr = errors.New("unavailable")
+	writer := testServer(t, backend, nil)
+	data := []byte("strict backend failure")
+	if response := putCacheObject(writer, "/cas/"+digest(data), data); response.Code != http.StatusNoContent {
+		t.Fatalf("seed PUT = %d", response.Code)
+	}
+	closePackedServer(t, writer)
 	server := testServer(t, backend, func(cfg *Config) {
 		cfg.FailOpen = false
 	})
-	request := httptest.NewRequest(http.MethodGet, "/ac/"+strings.Repeat("a", 64), nil)
-	response := httptest.NewRecorder()
-	server.Handler().ServeHTTP(response, request)
+	backend.loadErr = errors.New("unavailable")
+	response := readCacheObject(server, "/cas/"+digest(data))
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", response.Code)
 	}
 }
 
-func TestCorruptCASBackendIsMiss(t *testing.T) {
+func TestUnknownCASDigestIsMiss(t *testing.T) {
 	backend := newMemoryBackend()
-	key := "test-v1-cas-" + strings.Repeat("a", 64)
-	backend.objects[key] = []byte("corrupt")
 	server := testServer(t, backend, nil)
 	request := httptest.NewRequest(http.MethodGet, "/cas/"+strings.Repeat("a", 64), nil)
 	response := httptest.NewRecorder()
@@ -369,25 +405,27 @@ func TestCorruptCASBackendIsMiss(t *testing.T) {
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", response.Code)
 	}
-	if server.Snapshot().BackendLoadErrors != 1 {
-		t.Fatalf("integrity failure was not counted")
+	if server.Snapshot().MissesCAS != 1 {
+		t.Fatalf("unknown digest was not counted as a cache miss: %+v", server.Snapshot())
 	}
 }
 
-func TestBackendDownloadIsMeasured(t *testing.T) {
+func TestPackedDownloadIsMeasured(t *testing.T) {
 	backend := newMemoryBackend()
 	data := []byte("persisted")
 	hash := digest(data)
-	backend.objects["test-v1-cas-"+hash] = data
+	seed := testServer(t, backend, nil)
+	if response := putCacheObject(seed, "/cas/"+hash, data); response.Code != http.StatusNoContent {
+		t.Fatalf("seed PUT = %d", response.Code)
+	}
+	closePackedServer(t, seed)
 	server := testServer(t, backend, nil)
-	request := httptest.NewRequest(http.MethodGet, "/cas/"+hash, nil)
-	response := httptest.NewRecorder()
-	server.Handler().ServeHTTP(response, request)
+	response := readCacheObject(server, "/cas/"+hash)
 	if response.Code != http.StatusOK || response.Body.String() != string(data) {
 		t.Fatalf("status/body = %d/%q", response.Code, response.Body.String())
 	}
-	if server.Snapshot().BackendDownloads != 1 {
-		t.Fatalf("backend download was not counted: %+v", server.Snapshot())
+	if server.Snapshot().PackDownloads != 1 {
+		t.Fatalf("packed download was not counted: %+v", server.Snapshot())
 	}
 }
 
@@ -431,6 +469,24 @@ func TestNewRejectsUnsafeConfiguration(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("unsafe key prefix accepted")
+	}
+}
+
+func TestNewRequiresManifestCatalog(t *testing.T) {
+	_, err := New(Config{
+		Backend:           newMemoryBackend(),
+		CacheDir:          t.TempDir(),
+		KeyPrefix:         "test-v1",
+		PackSize:          1024,
+		PackFlushInterval: time.Second,
+		MaxManifests:      1,
+		MaxBlobSize:       1024,
+		MaxConcurrent:     1,
+		UploadsPerMinute:  1,
+		BackendTimeout:    time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "manifest catalog is required") {
+		t.Fatalf("New error = %v, want manifest catalog required", err)
 	}
 }
 

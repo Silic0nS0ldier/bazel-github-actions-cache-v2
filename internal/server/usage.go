@@ -97,8 +97,7 @@ func (r *usageRecorder) record(kind, digest, pack, access string, size int64) {
 	if pack != "" {
 		entry.Pack = pack
 	}
-	// A presence check in objects mode reports no size, so never let that erase
-	// a size a download established.
+	// Never let a presence check without a size erase a size a download established.
 	if size >= 0 {
 		recorded := size
 		entry.Size = &recorded

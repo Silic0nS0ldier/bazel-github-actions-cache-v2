@@ -17,12 +17,8 @@ inputs:
     description: "Immutable GitHub cache-key namespace; change it to invalidate all entries"
     required: false
     default: bazel-http-v1
-  storage-mode:
-    description: "objects keeps the v0.2 object-per-entry format; packs enables CARv2 packs and manifest DAGs"
-    required: false
-    default: objects
   pack-size-mb:
-    description: "Target CARv2 pack size in MiB when storage-mode is packs (1-32)"
+    description: "Target CARv2 pack size in MiB (1-32)"
     required: false
     default: "8"
   pack-flush-seconds:
@@ -46,7 +42,7 @@ inputs:
     required: false
     default: "2048"
   github-token:
-    description: "GitHub token with actions: read, used only by storage-mode=packs to discover manifest cache keys"
+    description: "GitHub token with actions: read to discover manifest cache keys"
     required: false
     default: ${{ github.token }}
   max-blob-size-mb:
