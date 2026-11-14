@@ -24,6 +24,13 @@ jobs:
         run: go vet ./...
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+      - name: Deadcode
+        run: |
+          findings="$(go tool deadcode -test ./...)"
+          if [[ -n "$findings" ]]; then
+            printf '%s\n' "$findings"
+            exit 1
+          fi
       - name: Govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: Node wrapper tests
