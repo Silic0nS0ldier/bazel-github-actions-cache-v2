@@ -23,7 +23,7 @@ jobs:
       - name: Go vet
         run: go vet ./...
       - name: Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+        run: go tool staticcheck ./...
       - name: Deadcode
         run: |
           findings="$(go tool deadcode -test ./...)"
@@ -32,7 +32,7 @@ jobs:
             exit 1
           fi
       - name: Govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+        run: go tool govulncheck ./...
       - name: Node wrapper tests
         run: node --test action/*.test.js optimise/*.test.js
       - name: Actionlint
