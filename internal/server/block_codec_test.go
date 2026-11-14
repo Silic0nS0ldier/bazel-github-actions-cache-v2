@@ -12,7 +12,6 @@ import (
 func testPackedServerWithCompression(t *testing.T, backend *memoryBackend, maxBlobSize int64, enabled bool) *Server {
 	t.Helper()
 	return testServer(t, backend, func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = memoryCatalog{backend: backend}
 		cfg.MaxBlobSize = maxBlobSize
 		cfg.PackSize = maxBlobSize

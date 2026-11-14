@@ -1,7 +1,8 @@
 # Concept: CARv2 packs and a manifest DAG
 
-Status: implemented in v0.3 as the opt-in `storage-mode: packs` format. It does
-not change the v0.2 object-per-entry format or its wire compatibility.
+Status: implemented as the cache's only storage format. It preserves the
+existing HTTP and gRPC interfaces while replacing the earlier object-per-entry
+backend. Legacy object-per-entry cache entries are not read or migrated.
 
 ## Problem
 
@@ -33,8 +34,7 @@ hosted cache server or weakening Remote Execution API (REAPI) correctness.
 - Making GitHub Actions Cache a durable artifact store.
 - Supporting writes from untrusted pull requests or forks.
 - Introducing remote execution, a gRPC API, or a persistent service.
-- Replacing the v0.2 key space in place. The new backend uses a new namespace
-  and can be rolled out or removed independently.
+- Reading or migrating legacy v0.2 object-per-entry keys.
 
 ## Data model
 
@@ -181,10 +181,7 @@ property that incomplete Action Results are never served.
 A checkpoint manifest that commits several packs at once does not fit the
 single-pack key, and needs its own key scheme before compaction can be added.
 
-## Rollout and validation
-
-The implementation should be a separate backend mode and namespace, initially
-opt-in. Keep v0.2 available as a rollback path.
+## Implementation and validation
 
 Required tests include:
 
@@ -200,10 +197,9 @@ Required tests include:
 - An end-to-end cold seed followed by a fresh-runner warm restore, measuring
   cache-entry creations, transfer volume, and hit rate.
 
-The initial implementation uses an 8 MiB target and a 32 MiB normal-pack limit;
-an individual oversized CAS output receives its own pack. It is released
-opt-in so representative cold-seed and warm-read runs can tune those defaults
-without altering the v0.2 rollback path.
+The implementation uses an 8 MiB target and a 32 MiB normal-pack limit; an
+individual oversized CAS output receives its own pack. Pack size can be
+adjusted with the `pack-size-mb` action input.
 
 [go-car]: https://github.com/ipld/go-car
 [go-ipld]: https://github.com/ipld/go-ipld-prime

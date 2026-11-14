@@ -165,7 +165,6 @@ func TestConcurrentUploadBurstStaysWithinFileIOLimit(t *testing.T) {
 	const limit, uploads, chunk = 4, 500, 4 * 1024
 	backend := newMemoryBackend()
 	server := testServer(t, backend, func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = memoryCatalog{backend: backend}
 		cfg.MaxBlobSize = 64 * 1024
 		cfg.PackSize = 16 * 1024 * 1024
@@ -225,7 +224,6 @@ func TestConcurrentUploadBurstStaysWithinFileIOLimit(t *testing.T) {
 
 func burstPackedConfig(backend *memoryBackend) func(*Config) {
 	return func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = memoryCatalog{backend: backend}
 		// A restored pack is bounded by the blob size limit too.
 		cfg.MaxBlobSize = 16 * 1024 * 1024

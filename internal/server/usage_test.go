@@ -63,17 +63,15 @@ func TestUsageRecordsClosureValidationPresenceChecks(t *testing.T) {
 	if blob.PresenceChecks == 0 || blob.Access() != accessPresence {
 		t.Fatalf("output = %+v, want a presence check and no download", blob)
 	}
-	// Objects mode answers a presence check without learning a size. Reporting
-	// zero there would name the empty blob, which has a well-known digest.
-	if blob.Size != nil {
-		t.Fatalf("size = %d, want none", *blob.Size)
+	if blob.Size == nil || *blob.Size != outputReference.size {
+		t.Fatalf("size = %v, want %d from manifest", blob.Size, outputReference.size)
 	}
 	encoded, err := json.Marshal(blob)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), `"size"`) {
-		t.Fatalf("entry names a size it does not know: %s", encoded)
+	if !strings.Contains(string(encoded), `"size"`) {
+		t.Fatalf("entry is missing manifest size: %s", encoded)
 	}
 }
 
@@ -89,7 +87,6 @@ func TestUsageReportsPackYield(t *testing.T) {
 	packed := func(t *testing.T) *Server {
 		t.Helper()
 		return testServer(t, backend, func(cfg *Config) {
-			cfg.StorageMode = "packs"
 			cfg.Catalog = memoryCatalog{backend: backend}
 			cfg.PackSize = 1024
 			cfg.PackFlushInterval = time.Hour

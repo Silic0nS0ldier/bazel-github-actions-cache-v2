@@ -98,8 +98,8 @@ func TestActionResultReadRequiresCompleteCASClosure(t *testing.T) {
 		}
 		stats := server.Snapshot()
 		if stats.ValidatedActionResults != 1 || stats.IncompleteActionResults != 0 ||
-			stats.InvalidActionResults != 0 || stats.Hits != 1 || stats.BackendDownloads != 1 ||
-			stats.BackendExistenceChecks != 1 {
+			stats.InvalidActionResults != 0 || stats.Hits != 1 || stats.BackendDownloads != 0 ||
+			stats.BackendExistenceChecks != 0 {
 			t.Fatalf("unexpected stats: %+v", stats)
 		}
 	})
@@ -136,7 +136,7 @@ func TestActionResultReadAllowsImplicitEmptyCASDigest(t *testing.T) {
 	}
 	stats := server.Snapshot()
 	if stats.ValidatedActionResults != 1 || stats.IncompleteActionResults != 0 ||
-		stats.Hits != 1 || stats.BackendDownloads != 1 || stats.BackendExistenceChecks != 0 {
+		stats.Hits != 1 || stats.BackendDownloads != 0 || stats.BackendExistenceChecks != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 }
@@ -166,7 +166,7 @@ func TestActionResultReadValidatesTreeFileClosure(t *testing.T) {
 		t.Fatalf("status = %d, want 404", response.Code)
 	}
 	stats := server.Snapshot()
-	if stats.IncompleteActionResults != 1 || stats.BackendDownloads != 2 {
+	if stats.IncompleteActionResults != 1 || stats.BackendDownloads != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 }
@@ -202,8 +202,8 @@ func TestActionResultReadValidatesRootDirectoryClosure(t *testing.T) {
 			t.Fatalf("status = %d, want 200", response.Code)
 		}
 		stats := server.Snapshot()
-		if stats.ValidatedActionResults != 1 || stats.BackendDownloads != 3 ||
-			stats.BackendExistenceChecks != 1 {
+		if stats.ValidatedActionResults != 1 || stats.BackendDownloads != 0 ||
+			stats.BackendExistenceChecks != 0 {
 			t.Fatalf("unexpected stats: %+v", stats)
 		}
 	})
@@ -220,7 +220,7 @@ func TestActionResultReadValidatesRootDirectoryClosure(t *testing.T) {
 			t.Fatalf("status = %d, want 404", response.Code)
 		}
 		stats := server.Snapshot()
-		if stats.IncompleteActionResults != 1 || stats.BackendDownloads != 3 {
+		if stats.IncompleteActionResults != 1 || stats.BackendDownloads != 0 {
 			t.Fatalf("unexpected stats: %+v", stats)
 		}
 	})
@@ -258,19 +258,25 @@ func TestActionResultReadHandlesExistenceCheckErrors(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			backend := newMemoryBackend()
-			backend.objects["test-v1-ac-"+actionDigest] = actionResult
-			backend.existsErr = errors.New("unavailable")
+			writer := testServer(t, backend, nil)
+			if response := putCacheObject(writer, "/cas/"+outputReference.hash, []byte("output")); response.Code != http.StatusNoContent {
+				t.Fatalf("seed CAS PUT = %d", response.Code)
+			}
+			if response := putCacheObject(writer, "/ac/"+actionDigest, actionResult); response.Code != http.StatusNoContent {
+				t.Fatalf("seed AC PUT = %d", response.Code)
+			}
+			closePackedServer(t, writer)
 			server := testServer(t, backend, func(cfg *Config) {
 				cfg.FailOpen = test.failOpen
 			})
+			backend.loadErr = errors.New("unavailable")
 
 			response := readCacheObject(server, "/ac/"+actionDigest)
 			if response.Code != test.status {
 				t.Fatalf("status = %d, want %d", response.Code, test.status)
 			}
 			stats := server.Snapshot()
-			if stats.BackendLoadErrors != 1 || stats.Misses != test.misses ||
-				stats.BackendExistenceChecks != 1 {
+			if stats.BackendLoadErrors != 1 || stats.Misses != test.misses {
 				t.Fatalf("unexpected stats: %+v", stats)
 			}
 		})
@@ -285,20 +291,30 @@ func TestActionResultUploadPublishesOnlyCompleteCASClosure(t *testing.T) {
 
 	t.Run("complete", func(t *testing.T) {
 		backend := newMemoryBackend()
-		backend.objects["test-v1-cas-"+outputReference.hash] = output
 		server := testServer(t, backend, nil)
+		if response := putCacheObject(server, "/cas/"+outputReference.hash, output); response.Code != http.StatusNoContent {
+			t.Fatalf("CAS PUT = %d", response.Code)
+		}
 
 		response := putCacheObject(server, "/ac/"+actionDigest, actionResult)
 		if response.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body)
 		}
-		if !bytes.Equal(backend.objects["test-v1-ac-"+actionDigest], actionResult) {
-			t.Fatal("complete action result was not published")
+		if err := server.packs.flush(t.Context(), true); err != nil {
+			t.Fatal(err)
+		}
+		if err := server.packs.flush(t.Context(), true); err != nil {
+			t.Fatal(err)
 		}
 		stats := server.Snapshot()
-		if stats.Uploads != 1 || stats.ValidatedActionResults != 1 ||
+		if stats.PackUploads != 1 || stats.ManifestUploads != 1 || stats.Uploads != 2 || stats.ValidatedActionResults != 1 ||
 			stats.SkippedActionResultUploads != 0 {
 			t.Fatalf("unexpected stats: %+v", stats)
+		}
+		reader := testServer(t, backend, nil)
+		if restored := readCacheObject(reader, "/ac/"+actionDigest); restored.Code != http.StatusOK ||
+			!bytes.Equal(restored.Body.Bytes(), actionResult) {
+			t.Fatalf("complete action result was not restored: %d %q", restored.Code, restored.Body.Bytes())
 		}
 	})
 
@@ -310,8 +326,11 @@ func TestActionResultUploadPublishesOnlyCompleteCASClosure(t *testing.T) {
 		if response.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body)
 		}
-		if _, exists := backend.objects["test-v1-ac-"+actionDigest]; exists {
-			t.Fatal("incomplete action result was published")
+		server.packs.mu.Lock()
+		pending := len(server.packs.pendingActions)
+		server.packs.mu.Unlock()
+		if pending != 0 {
+			t.Fatal("incomplete action result was staged")
 		}
 		stats := server.Snapshot()
 		if stats.Uploads != 0 || stats.IncompleteActionResults != 1 ||
@@ -334,11 +353,11 @@ func TestActionResultUploadAllowsImplicitEmptyCASDigest(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body)
 	}
-	if !bytes.Equal(backend.objects["test-v1-ac-"+actionDigest], actionResult) {
-		t.Fatal("action result with an implicit empty digest was not published")
+	if err := server.packs.flush(t.Context(), true); err != nil {
+		t.Fatal(err)
 	}
 	stats := server.Snapshot()
-	if stats.Uploads != 1 || stats.ValidatedActionResults != 1 ||
+	if stats.PackUploads != 1 || stats.ManifestUploads != 1 || stats.Uploads != 2 || stats.ValidatedActionResults != 1 ||
 		stats.IncompleteActionResults != 0 || stats.SkippedActionResultUploads != 0 ||
 		stats.BackendExistenceChecks != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)

@@ -19,7 +19,7 @@ import (
 	"github.com/ipld/go-car/v2/blockstore"
 )
 
-// packStore implements the CARv2/manifest-DAG storage mode. It keeps
+// packStore implements CARv2/manifest-DAG storage. It keeps
 // uncommitted writes local, publishes a CARv2 pack first, and only then commits
 // the corresponding immutable DAG-CBOR manifest. A manifest therefore never
 // advertises data that a future runner cannot restore.
@@ -60,6 +60,7 @@ type packStore struct {
 	renewRequests chan struct{}
 	stop          chan struct{}
 	closeOnce     sync.Once
+	closeErr      error
 	workers       sync.WaitGroup
 }
 
@@ -98,7 +99,7 @@ var errPackUnavailable = errors.New("pack is unavailable")
 
 func newPackStore(server *Server) (*packStore, error) {
 	if server.cfg.Catalog == nil {
-		return nil, errors.New("packed storage mode requires a manifest catalog")
+		return nil, errors.New("manifest catalog is required")
 	}
 	codec, err := newBlockCodec(server.cfg.PackCompression, server.cfg.PackCompressionLevel, server.cfg.MaxBlobSize)
 	if err != nil {
@@ -169,20 +170,22 @@ func (p *packStore) flushWorker() {
 }
 
 func (p *packStore) close(ctx context.Context) error {
-	p.closeOnce.Do(func() { close(p.stop) })
-	p.workers.Wait()
-	err := p.flush(ctx, true)
-	p.renewPending(ctx)
-	p.codec.close()
-	p.server.objectFilesMu.Lock()
-	p.mu.Lock()
-	for _, pack := range p.loadedPacks {
-		_ = pack.store.Close()
-		p.removeLocalFile(pack.path)
-	}
-	p.mu.Unlock()
-	p.server.objectFilesMu.Unlock()
-	return err
+	p.closeOnce.Do(func() {
+		close(p.stop)
+		p.workers.Wait()
+		p.closeErr = p.flush(ctx, true)
+		p.renewPending(ctx)
+		p.codec.close()
+		p.server.objectFilesMu.Lock()
+		p.mu.Lock()
+		for _, pack := range p.loadedPacks {
+			_ = pack.store.Close()
+			p.removeLocalFile(pack.path)
+		}
+		p.mu.Unlock()
+		p.server.objectFilesMu.Unlock()
+	})
+	return p.closeErr
 }
 
 func (p *packStore) stageCAS(digest string, value object) bool {
@@ -623,6 +626,7 @@ func (p *packStore) flushOne(ctx context.Context) (bool, error) {
 	}()
 	pack := packDescriptor{ID: packID, Key: packKeyFor(p.keyPrefix, packID), Size: packSize}
 	if err := p.publishFile(ctx, pack.Key, packPath, packSize); err != nil {
+		p.server.stats.backendSaveErrors.Add(1)
 		return false, fmt.Errorf("publish CARv2 pack: %w", err)
 	}
 	p.server.stats.packUploads.Add(1)
@@ -641,6 +645,7 @@ func (p *packStore) flushOne(ctx context.Context) (bool, error) {
 	}
 	defer p.removeLocalFile(manifestPath)
 	if err := p.publishFile(ctx, manifestKeyFor(p.keyPrefix, pack.ID, manifestID), manifestPath, int64(len(manifestData))); err != nil {
+		p.server.stats.backendSaveErrors.Add(1)
 		return false, fmt.Errorf("publish manifest commit point: %w", err)
 	}
 	p.server.stats.manifestUploads.Add(1)

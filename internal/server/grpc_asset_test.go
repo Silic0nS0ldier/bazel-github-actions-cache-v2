@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"net/http"
@@ -123,20 +124,23 @@ func TestFetchBlobFetchesAndPublishesOnMiss(t *testing.T) {
 	if response.GetUri() != origin.URL+"/archive.tar.gz" {
 		t.Fatalf("uri = %q", response.GetUri())
 	}
-	// The fetched asset has to reach the shared cache, or no later job benefits.
-	if got := backend.objects["test-v1-cas-"+reference.hash]; string(got) != string(asset) {
-		t.Fatalf("asset was not published: %q", got)
-	}
 	server.objectsMu.RLock()
 	cached, ok := server.objects[server.objectKey("cas", reference.hash)]
 	server.objectsMu.RUnlock()
 	if !ok || !strings.HasPrefix(filepath.Base(cached.path), "asset-") {
 		t.Fatalf("cached asset was not retained from its download spool: %+v", cached)
 	}
+	if data, err := cached.readAll(); err != nil || !bytes.Equal(data, asset) {
+		t.Fatalf("cached asset data = %q, %v", data, err)
+	}
 	if uploads := spoolFiles(t, server.cfg.CacheDir); len(uploads) != 0 {
 		t.Fatalf("asset publication created a second upload spool: %v", uploads)
 	}
-	if stats := server.Snapshot(); stats.AssetDownloads != 1 || stats.Uploads != 1 {
+	if err := server.packs.flush(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if stats := server.Snapshot(); stats.AssetDownloads != 1 || stats.PackUploads != 1 ||
+		stats.ManifestUploads != 1 || stats.Uploads != 2 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 
@@ -283,8 +287,14 @@ func TestFetchBlobCachesAssetsDeclaredWithAnyChecksum(t *testing.T) {
 			if got := response.GetBlobDigest().GetHash(); got != reference.hash {
 				t.Fatalf("blob digest = %s, want %s", got, reference.hash)
 			}
-			if got := backend.objects["test-v1-cas-"+reference.hash]; string(got) != string(asset) {
-				t.Fatalf("asset was not published: %q", got)
+			server.objectsMu.RLock()
+			cached, ok := server.objects[server.objectKey("cas", reference.hash)]
+			server.objectsMu.RUnlock()
+			if !ok {
+				t.Fatal("fetched asset was not retained in the local cache")
+			}
+			if data, err := cached.readAll(); err != nil || !bytes.Equal(data, asset) {
+				t.Fatalf("cached asset data = %q, %v", data, err)
 			}
 
 			second := fetchBlob(t, server, request)
@@ -312,7 +322,6 @@ func TestAssetAliasSurvivesAPackedRoundTrip(t *testing.T) {
 	}.Build()
 
 	seed := testServer(t, backend, func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = memoryCatalog{backend: backend}
 		cfg.PackSize = 1024
 		cfg.PackFlushInterval = time.Hour
@@ -328,7 +337,6 @@ func TestAssetAliasSurvivesAPackedRoundTrip(t *testing.T) {
 	}
 
 	restored := testServer(t, backend, func(cfg *Config) {
-		cfg.StorageMode = "packs"
 		cfg.Catalog = memoryCatalog{backend: backend}
 		cfg.PackSize = 1024
 		cfg.PackFlushInterval = time.Hour

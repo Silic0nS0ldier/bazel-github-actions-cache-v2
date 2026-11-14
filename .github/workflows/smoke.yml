@@ -49,7 +49,6 @@ jobs:
         with:
           write: ${{ github.event_name == 'push' || inputs.mode == 'seed' }}
           key-prefix: bazel-http-smoke-car-v1
-          storage-mode: packs
       - name: Prepare stable object
         id: object
         shell: bash

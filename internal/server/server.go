@@ -44,7 +44,6 @@ type Config struct {
 	Catalog              cache.Catalog
 	CacheDir             string
 	KeyPrefix            string
-	StorageMode          string
 	PackSize             int64
 	PackFlushInterval    time.Duration
 	PackRenewInterval    time.Duration
@@ -120,34 +119,26 @@ func New(cfg Config) (*Server, error) {
 	if cfg.BackendTimeout <= 0 {
 		return nil, errors.New("backend timeout must be positive")
 	}
-	if cfg.StorageMode == "" {
-		cfg.StorageMode = "objects"
+	if cfg.Catalog == nil {
+		return nil, errors.New("manifest catalog is required")
 	}
-	if cfg.StorageMode != "objects" && cfg.StorageMode != "packs" {
-		return nil, errors.New("storage mode must be objects or packs")
+	if cfg.PackSize <= 0 || cfg.PackSize > 32*1024*1024 {
+		return nil, errors.New("pack size must be between 1 byte and 32 MiB")
 	}
-	if cfg.StorageMode == "packs" {
-		if cfg.Catalog == nil {
-			return nil, errors.New("packed storage mode requires a manifest catalog")
-		}
-		if cfg.PackSize <= 0 || cfg.PackSize > 32*1024*1024 {
-			return nil, errors.New("pack size must be between 1 byte and 32 MiB")
-		}
-		if cfg.PackFlushInterval <= 0 {
-			return nil, errors.New("pack flush interval must be positive")
-		}
-		if cfg.PackRenewInterval <= 0 {
-			cfg.PackRenewInterval = defaultPackRenewInterval
-		}
-		if cfg.PackCompressionLevel == 0 {
-			cfg.PackCompressionLevel = defaultPackCompressionLevel
-		}
-		if cfg.PackCompressionLevel < 1 || cfg.PackCompressionLevel > 19 {
-			return nil, errors.New("pack compression level must be between 1 and 19")
-		}
-		if cfg.MaxManifests <= 0 {
-			return nil, errors.New("maximum manifests must be positive")
-		}
+	if cfg.PackFlushInterval <= 0 {
+		return nil, errors.New("pack flush interval must be positive")
+	}
+	if cfg.PackRenewInterval <= 0 {
+		cfg.PackRenewInterval = defaultPackRenewInterval
+	}
+	if cfg.PackCompressionLevel == 0 {
+		cfg.PackCompressionLevel = defaultPackCompressionLevel
+	}
+	if cfg.PackCompressionLevel < 1 || cfg.PackCompressionLevel > 19 {
+		return nil, errors.New("pack compression level must be between 1 and 19")
+	}
+	if cfg.MaxManifests <= 0 {
+		return nil, errors.New("maximum manifests must be positive")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(io.Discard, "", 0)
@@ -177,13 +168,11 @@ func New(cfg Config) (*Server, error) {
 		backend: cfg.Backend,
 		counter: &server.stats.backendRequests,
 	}
-	if cfg.StorageMode == "packs" {
-		packs, err := newPackStore(server)
-		if err != nil {
-			return nil, err
-		}
-		server.packs = packs
+	packs, err := newPackStore(server)
+	if err != nil {
+		return nil, err
 	}
+	server.packs = packs
 	return server, nil
 }
 
@@ -233,9 +222,6 @@ func (s *Server) Usage() UsageReport {
 
 // Close commits every pending CARv2 batch before the action process exits.
 func (s *Server) Close(ctx context.Context) error {
-	if s.packs == nil {
-		return nil
-	}
 	return s.packs.close(ctx)
 }
 
@@ -293,7 +279,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 // issues these while building without the bytes, so restoring a whole pack to
 // answer one would defeat the point.
 func (s *Server) handleHead(w http.ResponseWriter, r *http.Request, kind, digest string) {
-	if s.packs == nil || kind != "cas" {
+	if kind != "cas" {
 		s.handleRead(w, r, kind, digest)
 		return
 	}
@@ -404,75 +390,11 @@ func (s *Server) resolveObject(ctx context.Context, key, kind, digest string) (o
 	if ok {
 		return obj, true, nil
 	}
-	if s.packs != nil {
-		return s.packs.resolve(ctx, key, kind, digest)
-	}
-
-	if err := s.acquire(ctx); err != nil {
-		return object{}, false, err
-	}
-	defer s.release()
-
-	// Re-check after waiting for another backend operation.
-	s.objectsMu.RLock()
-	obj, ok = s.objects[key]
-	s.objectsMu.RUnlock()
-	if ok {
-		return obj, true, nil
-	}
-
-	file, err := os.CreateTemp(s.cfg.CacheDir, "download-*")
-	if err != nil {
-		return object{}, false, fmt.Errorf("create download spool: %w", err)
-	}
-	path := file.Name()
-	keep := false
-	defer func() {
-		_ = file.Close()
-		if !keep {
-			_ = os.Remove(path)
-		}
-	}()
-
-	limited := &maxWriter{writer: file, remaining: s.cfg.MaxBlobSize}
-	backendCtx, cancel := context.WithTimeout(ctx, s.cfg.BackendTimeout)
-	defer cancel()
-	found, err := s.cfg.Backend.Load(backendCtx, key, limited)
-	if err != nil {
-		return object{}, false, err
-	}
-	if !found {
-		return object{}, false, nil
-	}
-	s.stats.backendDownloads.Add(1)
-	info, err := file.Stat()
-	if err != nil {
-		return object{}, false, fmt.Errorf("stat download spool: %w", err)
-	}
-	if kind == "cas" {
-		actual, err := hashFile(file)
-		if err != nil {
-			return object{}, false, err
-		}
-		if actual != digest {
-			return object{}, false, fmt.Errorf("CAS integrity check failed: expected %s, got %s", digest, actual)
-		}
-	}
-	obj = object{path: path, size: info.Size()}
-	s.objectsMu.Lock()
-	if existing, exists := s.objects[key]; exists {
-		obj = existing
-	} else {
-		s.objects[key] = obj
-		keep = true
-	}
-	s.objectsMu.Unlock()
-	return obj, true, nil
+	return s.packs.resolve(ctx, key, kind, digest)
 }
 
-// presence reports whether a CAS object can be served, and its recorded size
-// when the storage mode knows that without a download. Packed mode answers
-// from the manifest view and renews the holding pack's retention.
+// presence reports whether a CAS object can be served and its recorded size
+// from the manifest view, without restoring its pack.
 func (s *Server) presence(ctx context.Context, kind, digest string) (int64, bool, error) {
 	key := s.objectKey(kind, digest)
 	s.objectsMu.RLock()
@@ -482,29 +404,19 @@ func (s *Server) presence(ctx context.Context, kind, digest string) (int64, bool
 		s.usage.record(kind, digest, s.packFor(kind, digest), accessPresence, object.size)
 		return object.size, true, nil
 	}
-	if s.packs != nil {
-		if kind != "cas" {
-			return 0, false, errors.New("packed storage can only resolve CAS keys")
-		}
-		size, found := s.packs.presence(digest)
-		if found {
-			s.usage.record(kind, digest, s.packFor(kind, digest), accessPresence, size)
-		}
-		return size, found, nil
+	if kind != "cas" {
+		return 0, false, errors.New("packed storage can only resolve CAS keys")
 	}
-	found, err := s.backendExists(ctx, key)
+	size, found := s.packs.presence(digest)
 	if found {
-		s.usage.record(kind, digest, "", accessPresence, -1)
+		s.usage.record(kind, digest, s.packFor(kind, digest), accessPresence, size)
 	}
-	return -1, found, err
+	return size, found, nil
 }
 
 // packFor names the pack serving an entry, which is what lets a later
 // optimisation pass map usage onto cache layout.
 func (s *Server) packFor(kind, digest string) string {
-	if s.packs == nil {
-		return ""
-	}
 	return s.packs.packFor(kind, digest)
 }
 

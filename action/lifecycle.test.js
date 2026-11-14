@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { after, before, test } = require("node:test");
 const { serverArchitecture } = require("./main");
 const { processExists, waitForProcessExit } = require("./post");
@@ -21,8 +21,22 @@ const architecture = serverArchitecture(
 let root;
 let tools;
 let action;
+let catalogServer;
+let catalogPort;
 
-before(() => {
+before(async () => {
+  catalogServer = spawn(process.execPath, ["-e", `
+    require("node:http").createServer((_request, response) => {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end('{"actions_caches":[]}');
+    }).listen(0, "127.0.0.1", function () {
+      process.stdout.write(String(this.address().port));
+    });
+  `], { stdio: ["ignore", "pipe", "inherit"] });
+  catalogPort = await new Promise((resolve, reject) => {
+    catalogServer.once("error", reject);
+    catalogServer.stdout.once("data", (data) => resolve(Number(data.toString())));
+  });
   root = fs.mkdtempSync(path.join(os.tmpdir(), "cache lifecycle "));
   tools = path.join(root, "tools");
   action = path.join(root, "action");
@@ -50,7 +64,11 @@ before(() => {
   assert.equal(build.status, 0, build.stdout + build.stderr);
 });
 
-after(() => {
+after(async () => {
+  if (catalogServer?.exitCode === null) {
+    catalogServer.kill();
+    await new Promise((resolve) => catalogServer.once("exit", resolve));
+  }
   if (root) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -80,6 +98,9 @@ function start(t, inputs = {}) {
     RUNNER_TOOL_CACHE: tools,
     GITHUB_ACTION_REPOSITORY: "cre4ture/bazel-github-actions-cache-v2",
     GITHUB_ACTION_REF: "lifecycle",
+    GITHUB_REPOSITORY: "cre4ture/bazel-github-actions-cache-v2",
+    GITHUB_API_URL: `http://127.0.0.1:${catalogPort}`,
+    "INPUT_GITHUB-TOKEN": "synthetic-token",
     GITHUB_STATE: stateFile,
     GITHUB_OUTPUT: outputFile,
     ACTIONS_CACHE_SERVICE_V2: "true",
