@@ -28,11 +28,6 @@ func (s *Server) validateActionResult(ctx context.Context, object object) error 
 	return err
 }
 
-func (s *Server) validateActionResultForPublication(ctx context.Context, object object) error {
-	_, err := s.validateActionResultClosure(ctx, object, true, false)
-	return err
-}
-
 func (s *Server) collectActionResultClosure(ctx context.Context, object object) ([]digestReference, error) {
 	return s.validateActionResultClosure(ctx, object, false, true)
 }
