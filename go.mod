@@ -1,25 +1,22 @@
 module github.com/cre4ture/bazel-github-actions-cache-v2
 
-go 1.26.0
+go 1.27.4
 
 require (
+	cloud.google.com/go/longrunning v1.2.0
 	github.com/ipfs/go-block-format v0.2.3
 	github.com/ipfs/go-cid v0.6.1
 	github.com/ipld/go-car/v2 v2.17.0
 	github.com/ipld/go-ipld-prime v0.24.0
+	github.com/klauspost/compress v1.20.2
 	github.com/multiformats/go-multihash v0.2.3
 	github.com/tonistiigi/go-actions-cache v0.0.0-20260120203934-54bc28c26fd2
-	lukechampine.com/blake3 v1.4.1
-)
-
-require (
-	cloud.google.com/go/longrunning v1.2.0
-	github.com/klauspost/compress v1.20.2
 	golang.org/x/sync v0.24.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20260706201446-f0a921348800
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800
 	google.golang.org/grpc v1.83.2 // v1.84.0 is affected by GO-2026-6443; stay on the patched 1.83 line
 	google.golang.org/protobuf v1.36.12
+	lukechampine.com/blake3 v1.4.1
 )
 
 require (
